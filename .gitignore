@@ -1,0 +1,26 @@
+# Build directory
+build/
+
+# BPF object files
+*.bpf.o
+*.o
+
+# Compiled binaries
+rapl_stats_updater
+scx_reader
+
+# BPF pinned maps (if accidentally tracked)
+/sys/fs/bpf/
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug and profiling
+*.log
+core
+vgcore.*
