@@ -36,10 +36,12 @@ USER_BIN = $(BUILD_DIR)/rapl_stats_updater
 SCX_READER = $(BUILD_DIR)/scx_reader
 SCX_FIFO_BPF = $(BUILD_DIR)/scx_fifo.bpf.o
 SCX_FIFO_BIN = $(BUILD_DIR)/scx_fifo
+ENERGY_BPF_OBJ = $(BUILD_DIR)/scx_energy_aware.bpf.o
+ENERGY_LOADER = $(BUILD_DIR)/scx_energy_aware
 
 .PHONY: all clean
 
-all: $(BUILD_DIR) $(BPF_OBJ) $(USER_BIN) $(SCX_READER) $(SCX_FIFO_BPF) $(SCX_FIFO_BIN)
+all: $(BUILD_DIR) $(BPF_OBJ) $(USER_BIN) $(SCX_READER) $(SCX_FIFO_BPF) $(SCX_FIFO_BIN) $(ENERGY_BPF_OBJ) $(ENERGY_LOADER)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -69,6 +71,16 @@ $(SCX_FIFO_BIN): src/scx_fifo_loader.c $(SCX_FIFO_BPF)
 	$(CC) $(CFLAGS) src/scx_fifo_loader.c -o $(SCX_FIFO_BIN) $(LDFLAGS)
 	@echo "FIFO scheduler loader built: $(SCX_FIFO_BIN)"
 
+# Build Energy-Aware scheduler BPF object
+$(ENERGY_BPF_OBJ): src/scx_energy_aware.bpf.c $(INCLUDE_DIR)/rapl_stats.h
+	$(CLANG) $(BPF_SCX_CFLAGS) -c src/scx_energy_aware.bpf.c -o $(ENERGY_BPF_OBJ)
+	@echo "Energy-Aware scheduler BPF object built: $(ENERGY_BPF_OBJ)"
+
+# Build Energy-Aware scheduler loader
+$(ENERGY_LOADER): src/scx_energy_aware_loader.c $(ENERGY_BPF_OBJ)
+	$(CC) $(CFLAGS) src/scx_energy_aware_loader.c -o $(ENERGY_LOADER) $(LDFLAGS)
+	@echo "Energy-Aware scheduler loader built: $(ENERGY_LOADER)"
+
 # Run the program
 run: all
 	@echo "Running RAPL stats updater..."
@@ -83,6 +95,11 @@ test-scx: all
 run-fifo: all
 	@echo "Running FIFO scheduler..."
 	@cd $(BUILD_DIR) && sudo ./scx_fifo
+
+# Run Energy-Aware scheduler
+run-energy: all
+	@echo "Running Energy-Aware scheduler..."
+	@cd $(BUILD_DIR) && sudo ./scx_energy_aware
 
 clean:
 	rm -rf $(BUILD_DIR)
