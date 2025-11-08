@@ -21,14 +21,19 @@ int main(int argc, char **argv) {
     struct bpf_program *prog;
     struct bpf_link *link = NULL;
     int map_fd;
+    int timer_prog_fd;
     int err;
     
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     
-    obj = bpf_object__open_file("repl_stats_interval.bpf.o", NULL);
+    // Use relative path from build directory or full path
+    const char *bpf_obj_path = argc > 1 ? argv[1] : "repl_stats_interval.bpf.o";
+    
+    obj = bpf_object__open_file(bpf_obj_path, NULL);
     if (libbpf_get_error(obj)) {
-        fprintf(stderr, "ERROR: failed to open BPF object\n");
+        fprintf(stderr, "ERROR: failed to open BPF object at %s\n", bpf_obj_path);
+        fprintf(stderr, "Make sure you run this from the build/ directory or provide the path\n");
         return 1;
     }
     
@@ -38,12 +43,14 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
     
+    // Find the stats map
     map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_stats_map");
     if (map_fd < 0) {
         fprintf(stderr, "ERROR: failed to find rapl_stats_map\n");
         goto cleanup;
     }
     
+    // Pin the map so SCX can access it
     const char *pin_path = "/sys/fs/bpf/rapl_stats";
     err = bpf_obj_pin(map_fd, pin_path);
     if (err && errno != EEXIST) {
@@ -52,39 +59,34 @@ int main(int argc, char **argv) {
         printf("BPF map pinned to: %s\n", pin_path);
     }
     
-    printf("RAPL Stats Updater started. Updating every 100ms...\n");
+    // Find and run the timer initialization program
+    prog = bpf_object__find_program_by_name(obj, "start_timer");
+    if (!prog) {
+        fprintf(stderr, "ERROR: failed to find start_timer program\n");
+        goto cleanup;
+    }
+    
+    timer_prog_fd = bpf_program__fd(prog);
+    if (timer_prog_fd < 0) {
+        fprintf(stderr, "ERROR: failed to get program fd\n");
+        goto cleanup;
+    }
+    
+    // Execute the timer initialization program
+    LIBBPF_OPTS(bpf_test_run_opts, opts);
+    err = bpf_prog_test_run_opts(timer_prog_fd, &opts);
+    if (err || opts.retval) {
+        fprintf(stderr, "ERROR: failed to start BPF timer: %d (retval: %d)\n", err, opts.retval);
+        goto cleanup;
+    }
+    
+    printf("RAPL Stats Updater started with BPF timer (100ms interval)\n");
     printf("SCX can read stats from BPF map at: %s\n", pin_path);
     printf("Press Ctrl+C to stop.\n\n");
     
+    // Just wait for signal - no userspace loop needed!
     while (keep_running) {
-        struct rapl_stats stats;
-        __u32 key = 0;
-        
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        stats.timestamp = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-        stats.delta_time = 100000000; // 100ms in ns
-        
-        stats.package_power = 15 + (rand() % 80);
-        stats.core_power = 10 + (rand() % 55);
-        stats.package_energy = (stats.package_power * 100) / 1000;
-        stats.core_energy = (stats.core_power * 100) / 1000;
-        stats.package_temp = 40 + (rand() % 45);
-        stats.core_temp = 38 + (rand() % 44);
-        stats.tdp = 35 + (rand() % 90);
-        
-        bpf_map_update_elem(map_fd, &key, &stats, BPF_ANY);
-        
-        if (bpf_map_lookup_elem(map_fd, &key, &stats) == 0) {
-            printf("\r[Time: %llu ns] Package: %lluW/%lluJ %u°C | Core: %lluW/%lluJ %u°C | TDP: %lluW    ",
-                   stats.timestamp,
-                   stats.package_power, stats.package_energy, stats.package_temp,
-                   stats.core_power, stats.core_energy, stats.core_temp,
-                   stats.tdp);
-            fflush(stdout);
-        }
-        
-        usleep(100000);
+        sleep(1);
     }
     
     printf("\n\nStopping...\n");
