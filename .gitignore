@@ -24,3 +24,5 @@ scx_reader
 *.log
 core
 vgcore.*
+
+src/include/vmlinux.h
