@@ -84,9 +84,9 @@ int main(int argc, char **argv) {
     printf("SCX can read stats from BPF map at: %s\n", pin_path);
     printf("Press Ctrl+C to stop.\n\n");
     
-    // Just wait for signal - no userspace loop needed!
+    // Block until signal - no CPU waste!
     while (keep_running) {
-        sleep(1);
+        pause();  /* Suspends process until signal arrives */
     }
     
     printf("\n\nStopping...\n");

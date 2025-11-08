@@ -71,9 +71,9 @@ int main(int argc, char **argv) {
     printf("FIFO scheduler loaded and attached successfully\n");
     printf("Press Ctrl+C to stop and unload the scheduler\n\n");
     
-    /* Wait for signal */
+    /* Block until signal received - no CPU waste! */
     while (keep_running) {
-        sleep(1);
+        pause();  /* Suspends process until signal arrives */
     }
     
     printf("\nUnloading scheduler...\n");
