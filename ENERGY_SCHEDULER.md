@@ -1,21 +1,21 @@
-# Round-Robin Scheduler Demo
+# Cold-Aware Round-Robin Scheduler Demo
 
-The current "energy-aware" scheduler implementation is intentionally minimal: it attaches a Round-Robin sched_ext policy and simply streams the synthetic values produced by the RAPL stats updater. This is the plumbing step before we start consuming the stats for scheduling decisions.
+The current scheduler remains intentionally minimal, but it now demonstrates how to consume the synthetic RAPL telemetry: every time a task wakes up, the scheduler selects the coldest CPU (round-robin among ties) before inserting the task into the per-CPU DSQ. All stats continue to be streamed from the kernel via `bpf_printk` so you can validate the plumbing.
 
 ## Components
 
 1. **BPF Scheduler (`src/scx_energy_aware.bpf.c`)**
    - Implements a per-CPU Round-Robin queue by inserting runnable tasks into the local DSQ with the default sched_ext slice.
-   - Reads the shared `rapl_stats` map and emits the latest stats via `bpf_printk`, so the output lands in the kernel trace buffer.
+   - Reads the shared `rapl_stats` map plus the `/sys/fs/bpf/rapl_temps` per-core temperature map, selects the coldest allowed CPU, and emits the stats via `bpf_printk`.
 
 2. **Userspace Loader (`src/scx_energy_aware_loader.c`)**
-   - Loads the BPF object, attaches the struct_ops scheduler, and reuses the pinned `/sys/fs/bpf/rapl_stats` map so the kernel program can see the data.
+   - Loads the BPF object, attaches the struct_ops scheduler, and reuses the pinned `/sys/fs/bpf/rapl_stats` and `/sys/fs/bpf/rapl_temps` maps so the kernel program can see the data.
    - No longer prints stats itself; instead it just keeps the scheduler attached while you watch the kernel log (e.g., `trace_pipe`).
 
 ## Prerequisites
 
 1. Linux kernel 6.12+ with sched_ext enabled.
-2. `rapl_stats_updater` running so the pinned stats map exists and receives fresh random values.
+2. `rapl_stats_updater` running so the pinned stats and temps maps exist and receive fresh random values.
 3. Root privileges (required for sched_ext and map access).
 
 ## Building
@@ -37,7 +37,7 @@ Relevant build artifacts:
    sudo ./build/rapl_stats_updater
    ```
 
-   This pins the shared map at `/sys/fs/bpf/rapl_stats` and refreshes it every 100 ms with random data.
+   This pins the shared maps at `/sys/fs/bpf/rapl_stats` and `/sys/fs/bpf/rapl_temps`, refreshing them every 100 ms with random data.
 
 2. **Attach the Round-Robin scheduler**
 
@@ -65,6 +65,7 @@ Relevant build artifacts:
 ```
 Round-Robin scheduler loaded and attached successfully.
 Pinned RAPL stats map: /sys/fs/bpf/rapl_stats
+Pinned RAPL temps map: /sys/fs/bpf/rapl_temps
 Stats are emitted from the kernel via bpf_printk.
 Run 'sudo cat /sys/kernel/debug/tracing/trace_pipe' to monitor them.
 Press Ctrl+C to stop.

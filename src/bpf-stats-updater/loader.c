@@ -20,7 +20,8 @@ int main(int argc, char **argv) {
     struct bpf_object *obj;
     struct bpf_program *prog;
     struct bpf_link *link = NULL;
-    int map_fd;
+    int stats_map_fd;
+    int temps_map_fd;
     int config_map_fd;
     int timer_prog_fd;
     int err;
@@ -51,8 +52,8 @@ int main(int argc, char **argv) {
         long cpu_cnt = sysconf(_SC_NPROCESSORS_ONLN);
         if (cpu_cnt < 1)
             cpu_cnt = 1;
-        if (cpu_cnt > MAX_CORE_SENSORS)
-            cpu_cnt = MAX_CORE_SENSORS;
+        if (cpu_cnt > MAX_CORE_TEMPS)
+            cpu_cnt = MAX_CORE_TEMPS;
         cfg.core_count = cpu_cnt;
         if (bpf_map_update_elem(config_map_fd, &cfg_key, &cfg, BPF_ANY))
             fprintf(stderr, "WARNING: failed to set core_count config: %s\n",
@@ -62,19 +63,33 @@ int main(int argc, char **argv) {
     }
     
     // Find the stats map
-    map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_stats_map");
-    if (map_fd < 0) {
+    stats_map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_stats_map");
+    if (stats_map_fd < 0) {
         fprintf(stderr, "ERROR: failed to find rapl_stats_map\n");
         goto cleanup;
     }
+
+    temps_map_fd = bpf_object__find_map_fd_by_name(obj, "core_temp_map");
+    if (temps_map_fd < 0) {
+        fprintf(stderr, "ERROR: failed to find core_temp_map\n");
+        goto cleanup;
+    }
     
-    // Pin the map so SCX can access it
-    const char *pin_path = "/sys/fs/bpf/rapl_stats";
-    err = bpf_obj_pin(map_fd, pin_path);
+    // Pin the maps so SCX can access them
+    const char *stats_pin_path = "/sys/fs/bpf/rapl_stats";
+    const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
+    err = bpf_obj_pin(stats_map_fd, stats_pin_path);
     if (err && errno != EEXIST) {
-        fprintf(stderr, "WARNING: failed to pin map to %s: %s\n", pin_path, strerror(errno));
+        fprintf(stderr, "WARNING: failed to pin map to %s: %s\n", stats_pin_path, strerror(errno));
     } else {
-        printf("BPF map pinned to: %s\n", pin_path);
+        printf("BPF map pinned to: %s\n", stats_pin_path);
+    }
+
+    err = bpf_obj_pin(temps_map_fd, temps_pin_path);
+    if (err && errno != EEXIST) {
+        fprintf(stderr, "WARNING: failed to pin map to %s: %s\n", temps_pin_path, strerror(errno));
+    } else {
+        printf("BPF map pinned to: %s\n", temps_pin_path);
     }
     
     // Find and run the timer initialization program
@@ -99,7 +114,8 @@ int main(int argc, char **argv) {
     }
     
     printf("RAPL Stats Updater started with BPF timer (100ms interval)\n");
-    printf("SCX can read stats from BPF map at: %s\n", pin_path);
+    printf("SCX can read stats from BPF map at: %s\n", stats_pin_path);
+    printf("Per-core temps available at: %s\n", temps_pin_path);
     printf("Press Ctrl+C to stop.\n\n");
     
     // Block until signal - no CPU waste!
@@ -110,6 +126,7 @@ int main(int argc, char **argv) {
     printf("\n\nStopping...\n");
     
     unlink("/sys/fs/bpf/rapl_stats");
+    unlink("/sys/fs/bpf/rapl_temps");
     
 cleanup:
     if (link)

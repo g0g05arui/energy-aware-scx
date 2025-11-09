@@ -9,7 +9,9 @@
 
 int main(int argc, char **argv) {
     const char *pin_path = "/sys/fs/bpf/rapl_stats";
+    const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
     int map_fd;
+    int temps_fd;
     struct rapl_stats stats;
     __u32 key = 0;
     int err;
@@ -23,11 +25,20 @@ int main(int argc, char **argv) {
         return 1;
     }
     
+    temps_fd = bpf_obj_get(temps_pin_path);
+    if (temps_fd < 0) {
+        fprintf(stderr, "ERROR: failed to open pinned map at %s: %s\n",
+                temps_pin_path, strerror(errno));
+        close(map_fd);
+        return 1;
+    }
+    
     // Read the stats from the map
     err = bpf_map_lookup_elem(map_fd, &key, &stats);
     if (err) {
         fprintf(stderr, "ERROR: failed to read from map: %s\n", strerror(errno));
         close(map_fd);
+        close(temps_fd);
         return 1;
     }
     
@@ -45,9 +56,14 @@ int main(int argc, char **argv) {
     printf("Core Energy:    %llu J\n", stats.core_energy);
     printf("Core Count:     %u\n", stats.core_count);
     printf("Core Temps:     ");
-    for (int i = 0; i < MAX_CORE_SENSORS; i++) {
-        printf("%u", stats.core_temp[i]);
-        if (i != MAX_CORE_SENSORS - 1)
+    for (unsigned int i = 0; i < stats.core_count; i++) {
+        __u32 idx = i;
+        __u32 temp = 0;
+        if (bpf_map_lookup_elem(temps_fd, &idx, &temp) == 0)
+            printf("%u", temp);
+        else
+            printf("?");
+        if (i + 1 != stats.core_count)
             printf(", ");
     }
     printf(" °C\n");
@@ -55,5 +71,6 @@ int main(int argc, char **argv) {
     printf("TDP:            %llu W\n", stats.tdp);
     
     close(map_fd);
+    close(temps_fd);
     return 0;
 }

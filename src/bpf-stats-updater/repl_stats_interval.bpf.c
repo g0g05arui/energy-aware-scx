@@ -19,6 +19,13 @@ struct {
     __type(value, struct rapl_config);
 } rapl_config_map SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, MAX_CORE_TEMPS);
+    __type(key, __u32);
+    __type(value, __u32);
+} core_temp_map SEC(".maps");
+
 // Timer wrapper struct
 struct timer_wrapper {
     struct bpf_timer timer;
@@ -50,14 +57,14 @@ static int timer_callback(void *map, int *key, struct bpf_timer *timer)
     __u32 config_key = 0;
     struct rapl_stats *stats;
     struct rapl_config *cfg;
-    __u32 core_count = MAX_CORE_SENSORS;
+    __u32 core_count = MAX_CORE_TEMPS;
 
     stats = bpf_map_lookup_elem(&rapl_stats_map, &stats_key);
     if (!stats)
         return 0;
 
     cfg = bpf_map_lookup_elem(&rapl_config_map, &config_key);
-    if (cfg && cfg->core_count > 0 && cfg->core_count <= MAX_CORE_SENSORS)
+    if (cfg && cfg->core_count > 0 && cfg->core_count <= MAX_CORE_TEMPS)
         core_count = cfg->core_count;
     
     // Generate timestamp
@@ -74,10 +81,15 @@ static int timer_callback(void *map, int *key, struct bpf_timer *timer)
     
     // Generate random temperature values (in degrees Celsius)
     stats->package_temp = rand_range(40, 85);
-#pragma unroll
-    for (int i = 0; i < MAX_CORE_SENSORS; i++)
-        stats->core_temp[i] = rand_range(38, 82);
     stats->core_count = core_count;
+#pragma clang loop unroll(disable)
+    for (int i = 0; i < MAX_CORE_TEMPS; i++) {
+        if (i >= core_count)
+            break;
+        __u32 idx = i;
+        __u32 temp = rand_range(38, 82);
+        bpf_map_update_elem(&core_temp_map, &idx, &temp, BPF_ANY);
+    }
     
     // TDP
     stats->tdp = rand_range(35, 125);
