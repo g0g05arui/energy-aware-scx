@@ -1,37 +1,22 @@
-# Energy-Aware Scheduler
+# Round-Robin Scheduler Demo
 
-An energy-aware CPU scheduler built with sched_ext that dynamically adjusts scheduling decisions based on real-time power consumption and temperature measurements from RAPL (Running Average Power Limit).
+The current "energy-aware" scheduler implementation is intentionally minimal: it attaches a Round-Robin sched_ext policy and simply streams the synthetic values produced by the RAPL stats updater. This is the plumbing step before we start consuming the stats for scheduling decisions.
 
-## Features
+## Components
 
-- **Dynamic Time Slice Adjustment**: Adapts CPU time slices based on current power and thermal state
-- **Three Operating Modes**:
-  - **Normal Mode**: Full performance (temp < 75°C, power < 80% TDP)
-  - **Power Save Mode**: Reduced time slices (temp ≥ 75°C OR power ≥ 80% TDP)
-  - **Aggressive Save Mode**: Minimal time slices (temp ≥ 85°C)
-- **Real-time RAPL Integration**: Uses BPF maps to read power/temperature stats
-- **Live Monitoring**: Displays current energy state and scheduler statistics every 5 seconds
+1. **BPF Scheduler (`src/scx_energy_aware.bpf.c`)**
+   - Implements a per-CPU Round-Robin queue by inserting runnable tasks into the local DSQ with the default sched_ext slice.
+   - Reads the shared `rapl_stats` map and emits the latest stats via `bpf_printk`, so the output lands in the kernel trace buffer.
 
-## Architecture
-
-The energy-aware scheduler consists of two main components:
-
-1. **BPF Scheduler** (`scx_energy_aware.bpf.c`):
-   - Implements the sched_ext scheduling policy
-   - Reads RAPL stats from shared BPF map
-   - Adjusts time slices based on power/thermal state
-   - Tracks scheduling decisions
-
-2. **Userspace Loader** (`scx_energy_aware_loader.c`):
-   - Loads and attaches the BPF scheduler
-   - Monitors and displays energy state
-   - Shows real-time statistics
+2. **Userspace Loader (`src/scx_energy_aware_loader.c`)**
+   - Loads the BPF object, attaches the struct_ops scheduler, and reuses the pinned `/sys/fs/bpf/rapl_stats` map so the kernel program can see the data.
+   - No longer prints stats itself; instead it just keeps the scheduler attached while you watch the kernel log (e.g., `trace_pipe`).
 
 ## Prerequisites
 
-1. Linux kernel with sched_ext support (6.12+)
-2. RAPL stats updater running (provides energy measurements)
-3. Root privileges
+1. Linux kernel 6.12+ with sched_ext enabled.
+2. `rapl_stats_updater` running so the pinned stats map exists and receives fresh random values.
+3. Root privileges (required for sched_ext and map access).
 
 ## Building
 
@@ -39,165 +24,67 @@ The energy-aware scheduler consists of two main components:
 make
 ```
 
-This builds:
-- `build/scx_energy_aware.bpf.o` - BPF scheduler object
-- `build/scx_energy_aware` - Userspace loader
+Relevant build artifacts:
+
+- `build/scx_energy_aware.bpf.o` – Round-Robin sched_ext program.
+- `build/scx_energy_aware` – Loader/monitor binary.
 
 ## Usage
 
-### Step 1: Start RAPL Stats Updater
+1. **Start the RAPL stats updater**
 
-In one terminal:
-```bash
-sudo ./build/rapl_stats_updater
+   ```bash
+   sudo ./build/rapl_stats_updater
+   ```
+
+   This pins the shared map at `/sys/fs/bpf/rapl_stats` and refreshes it every 100 ms with random data.
+
+2. **Attach the Round-Robin scheduler**
+
+   ```bash
+   sudo ./build/scx_energy_aware
+   # or
+   sudo make run-energy
+   ```
+
+   The loader:
+   - Attaches the Round-Robin sched_ext policy.
+   - Connects the BPF program to the pinned map so it can read stats in kernel space.
+   - Leaves actual logging to `bpf_printk`. Watch it via:
+
+     ```bash
+     sudo cat /sys/kernel/debug/tracing/trace_pipe
+     ```
+
+3. **Stop the scheduler**
+
+   Press `Ctrl+C`. The loader detaches the scheduler, closes the map FD, and exits cleanly.
+
+### Sample Output
+
+```
+Round-Robin scheduler loaded and attached successfully.
+Pinned RAPL stats map: /sys/fs/bpf/rapl_stats
+Stats are emitted from the kernel via bpf_printk.
+Run 'sudo cat /sys/kernel/debug/tracing/trace_pipe' to monitor them.
+Press Ctrl+C to stop.
+
+<trace_pipe output>
+...
+            scx_energy_aware: RAPL ts=433223512445 delta=100000000 pkg=79W/66C core=48W/60C tdp=102W
+            scx_energy_aware: RAPL ts=433323512679 delta=100000000 pkg=65W/62C core=40W/57C tdp=115W
 ```
 
-This will continuously update power/temperature measurements in a BPF map at `/sys/fs/bpf/rapl_stats`.
+## Next Steps
 
-### Step 2: Run Energy-Aware Scheduler
+With the Round-Robin baseline working, we can begin experimenting with policies that consume the map data—e.g., dynamic slices or task throttling based on package power/temperature.
 
-In another terminal:
-```bash
-sudo ./build/scx_energy_aware
-```
+## Files of Interest
 
-Or use the make target:
-```bash
-make run-energy
-```
-
-### Expected Output
-
-```
-======================================
-Energy-Aware Scheduler Loaded!
-======================================
-
-This scheduler adjusts task scheduling based on:
-  - Current power consumption
-  - Temperature
-  - TDP limits
-
-Power/Temperature Thresholds:
-  Normal:     Temp < 75°C, Power < 80% TDP
-  Power Save: Temp >= 75°C OR Power >= 80% TDP
-  Aggressive: Temp >= 85°C
-
-Press Ctrl+C to stop and unload the scheduler
-
-=== Current Energy State ===
-Package Power: 5 W  (TDP: 15 W, 33.3%)
-Package Temp:  55 °C
-Core Power:    3 W
-Core Temp:     52 °C
-Scheduler Mode: NORMAL - Performance Mode
-
-=== Scheduler Statistics ===
-Normal decisions:     1234567
-Power save decisions: 0
-Aggressive save:      0
-```
-
-## How It Works
-
-### Scheduling Policy
-
-The scheduler makes decisions in the `energy_aware_enqueue()` function:
-
-1. **Read RAPL Stats**: Fetch current power/temperature from BPF map
-2. **Evaluate State**:
-   - Check if temperature is critical (≥ 85°C) → Aggressive save mode
-   - Check if temperature is high (≥ 75°C) → Power save mode
-   - Check if power consumption is high (≥ 80% TDP) → Power save mode
-   - Otherwise → Normal mode
-3. **Assign Time Slice**:
-   - Normal: Full time slice (`SCX_SLICE_DFL`)
-   - Power Save: Half time slice (`SCX_SLICE_DFL / 2`)
-   - Aggressive: Quarter time slice (`SCX_SLICE_DFL / 4`)
-
-### Time Slice Impact
-
-- **Shorter time slices** = More context switches = Lower CPU frequency = Less power
-- **Longer time slices** = Fewer context switches = Higher CPU frequency = Better performance
-
-### Statistics Tracking
-
-The scheduler tracks:
-- Number of normal scheduling decisions
-- Number of power-saving decisions
-- Number of aggressive power-saving decisions
-
-These help evaluate how often the scheduler is in power-saving mode.
-
-## Tuning
-
-You can adjust the thresholds in `src/scx_energy_aware.bpf.c`:
-
-```c
-#define TEMP_THRESHOLD_HIGH 75        // °C - start power saving
-#define TEMP_THRESHOLD_CRITICAL 85    // °C - aggressive power saving
-#define POWER_THRESHOLD_PERCENT 80    // % of TDP
-```
-
-You can also modify the time slice ratios:
-
-```c
-#define SLICE_NORMAL SCX_SLICE_DFL           // Normal slice
-#define SLICE_POWER_SAVE (SCX_SLICE_DFL / 2)    // Power save
-#define SLICE_AGGRESSIVE_SAVE (SCX_SLICE_DFL / 4) // Aggressive save
-```
-
-After changes, rebuild with `make`.
-
-## Stopping the Scheduler
-
-Press `Ctrl+C` in the terminal running the scheduler. It will:
-1. Print final statistics
-2. Detach from the system
-3. Restore default scheduling
-
-## Testing
-
-You can stress test the scheduler to see it react to high power/temperature:
-
-```bash
-# Generate CPU load
-stress-ng --cpu 4 --timeout 60s
-```
-
-Watch the scheduler output to see it switch between modes as temperature/power increases.
-
-## Comparison with FIFO Scheduler
-
-The repository also includes a simple FIFO scheduler for comparison:
-
-```bash
-sudo ./build/scx_fifo
-```
-
-The FIFO scheduler doesn't consider energy - it always uses the same time slice regardless of power/temperature.
-
-## Troubleshooting
-
-### "RAPL stats map not found"
-- Make sure `rapl_stats_updater` is running first
-- Check that `/sys/fs/bpf/rapl_stats` exists
-
-### "Failed to attach struct_ops"
-- Ensure your kernel has sched_ext support
-- Check `dmesg` for kernel errors
-- Verify no other sched_ext scheduler is running
-
-### "Permission denied"
-- Run with `sudo`
-- Check that BPF is enabled in your kernel
-
-## Files
-
-- `src/scx_energy_aware.bpf.c` - BPF scheduler implementation
-- `src/scx_energy_aware_loader.c` - Userspace loader
-- `src/include/rapl_stats.h` - Shared RAPL stats structure
-- `Makefile` - Build configuration
+- `src/scx_energy_aware.bpf.c`
+- `src/scx_energy_aware_loader.c`
+- `src/include/rapl_stats.h`
+- `Makefile`
 
 ## Further Reading
 

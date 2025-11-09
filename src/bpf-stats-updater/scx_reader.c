@@ -43,7 +43,14 @@ int main(int argc, char **argv) {
     printf("\n");
     printf("Core Power:     %llu W\n", stats.core_power);
     printf("Core Energy:    %llu J\n", stats.core_energy);
-    printf("Core Temp:      %u °C\n", stats.core_temp);
+    printf("Core Count:     %u\n", stats.core_count);
+    printf("Core Temps:     ");
+    for (int i = 0; i < MAX_CORE_SENSORS; i++) {
+        printf("%u", stats.core_temp[i]);
+        if (i != MAX_CORE_SENSORS - 1)
+            printf(", ");
+    }
+    printf(" °C\n");
     printf("\n");
     printf("TDP:            %llu W\n", stats.tdp);
     

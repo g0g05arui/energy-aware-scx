@@ -21,6 +21,7 @@ int main(int argc, char **argv) {
     struct bpf_program *prog;
     struct bpf_link *link = NULL;
     int map_fd;
+    int config_map_fd;
     int timer_prog_fd;
     int err;
     
@@ -41,6 +42,23 @@ int main(int argc, char **argv) {
     if (err) {
         fprintf(stderr, "ERROR: failed to load BPF object: %d\n", err);
         goto cleanup;
+    }
+
+    config_map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_config_map");
+    if (config_map_fd >= 0) {
+        __u32 cfg_key = 0;
+        struct rapl_config cfg = {};
+        long cpu_cnt = sysconf(_SC_NPROCESSORS_ONLN);
+        if (cpu_cnt < 1)
+            cpu_cnt = 1;
+        if (cpu_cnt > MAX_CORE_SENSORS)
+            cpu_cnt = MAX_CORE_SENSORS;
+        cfg.core_count = cpu_cnt;
+        if (bpf_map_update_elem(config_map_fd, &cfg_key, &cfg, BPF_ANY))
+            fprintf(stderr, "WARNING: failed to set core_count config: %s\n",
+                    strerror(errno));
+    } else {
+        fprintf(stderr, "WARNING: rapl_config_map not found, using defaults\n");
     }
     
     // Find the stats map
