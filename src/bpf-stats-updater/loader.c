@@ -29,7 +29,6 @@ int main(int argc, char **argv) {
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     
-    // Use relative path from build directory or full path
     const char *bpf_obj_path = argc > 1 ? argv[1] : "repl_stats_interval.bpf.o";
     
     obj = bpf_object__open_file(bpf_obj_path, NULL);
@@ -62,7 +61,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "WARNING: rapl_config_map not found, using defaults\n");
     }
     
-    // Find the stats map
     stats_map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_stats_map");
     if (stats_map_fd < 0) {
         fprintf(stderr, "ERROR: failed to find rapl_stats_map\n");
@@ -75,7 +73,6 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
     
-    // Pin the maps so SCX can access them
     const char *stats_pin_path = "/sys/fs/bpf/rapl_stats";
     const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
     err = bpf_obj_pin(stats_map_fd, stats_pin_path);
@@ -92,7 +89,6 @@ int main(int argc, char **argv) {
         printf("BPF map pinned to: %s\n", temps_pin_path);
     }
     
-    // Find and run the timer initialization program
     prog = bpf_object__find_program_by_name(obj, "start_timer");
     if (!prog) {
         fprintf(stderr, "ERROR: failed to find start_timer program\n");
@@ -105,7 +101,6 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
     
-    // Execute the timer initialization program
     LIBBPF_OPTS(bpf_test_run_opts, opts);
     err = bpf_prog_test_run_opts(timer_prog_fd, &opts);
     if (err || opts.retval) {
@@ -118,9 +113,8 @@ int main(int argc, char **argv) {
     printf("Per-core temps available at: %s\n", temps_pin_path);
     printf("Press Ctrl+C to stop.\n\n");
     
-    // Block until signal - no CPU waste!
     while (keep_running) {
-        pause();  /* Suspends process until signal arrives */
+        pause(); 
     }
     
     printf("\n\nStopping...\n");

@@ -24,10 +24,8 @@ int main(int argc, char **argv) {
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     
-    /* Set up libbpf logging */
     libbpf_set_print(NULL);
     
-    /* Load BPF object file */
     const char *bpf_obj_path = argc > 1 ? argv[1] : "scx_fifo.bpf.o";
     
     obj = bpf_object__open_file(bpf_obj_path, NULL);
@@ -43,7 +41,6 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
     
-    /* Find and attach the scheduler struct_ops */
     struct bpf_program *prog;
     bpf_object__for_each_program(prog, obj) {
         const char *prog_name = bpf_program__name(prog);
@@ -71,9 +68,8 @@ int main(int argc, char **argv) {
     printf("FIFO scheduler loaded and attached successfully\n");
     printf("Press Ctrl+C to stop and unload the scheduler\n\n");
     
-    /* Block until signal received - no CPU waste! */
     while (keep_running) {
-        pause();  /* Suspends process until signal arrives */
+        pause(); 
     }
     
     printf("\nUnloading scheduler...\n");

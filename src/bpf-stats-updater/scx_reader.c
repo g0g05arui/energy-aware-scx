@@ -16,7 +16,6 @@ int main(int argc, char **argv) {
     __u32 key = 0;
     int err;
     
-    // Open the pinned BPF map
     map_fd = bpf_obj_get(pin_path);
     if (map_fd < 0) {
         fprintf(stderr, "ERROR: failed to open pinned map at %s: %s\n", 
@@ -33,7 +32,6 @@ int main(int argc, char **argv) {
         return 1;
     }
     
-    // Read the stats from the map
     err = bpf_map_lookup_elem(map_fd, &key, &stats);
     if (err) {
         fprintf(stderr, "ERROR: failed to read from map: %s\n", strerror(errno));
@@ -42,7 +40,6 @@ int main(int argc, char **argv) {
         return 1;
     }
     
-    // Print the stats
     printf("RAPL Stats from BPF Map:\n");
     printf("========================\n");
     printf("Timestamp:      %llu ns\n", stats.timestamp);

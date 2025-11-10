@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Cold-aware Round-Robin sched_ext scheduler */
+/* "Cold-aware" Round-Robin sched_ext scheduler */
 
 #include <scx/common.bpf.h>
 #include <bpf/bpf_helpers.h>
@@ -127,38 +126,27 @@ s32 BPF_STRUCT_OPS(cold_select_cpu, struct task_struct *p, s32 prev_cpu,
 	return cold_select_cpu_impl(p, prev_cpu, wake_flags);
 }
 
-/* Enqueue tasks to the per-CPU DSQ with a fixed timeslice. */
 void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, RR_SLICE_NS, enq_flags);
 }
 
-/* Dispatch next runnable task from the local DSQ. */
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
 	log_stats_from_map();
 	scx_bpf_dsq_move_to_local(SCX_DSQ_LOCAL);
 }
 
-void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
-{
-	/* No-op */
-}
+void BPF_STRUCT_OPS(rr_running, struct task_struct *p){}
 
-void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable)
-{
-	/* No-op */
-}
+void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable){}
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 {
 	return scx_bpf_create_dsq(0, -1);
 }
 
-void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei)
-{
-	/* No-op */
-}
+void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei){}
 
 SEC(".struct_ops.link")
 struct sched_ext_ops energy_aware_ops = {

@@ -7,19 +7,17 @@
 #define MAX_CORE_TEMPS 64
 
 struct rapl_stats{
-    // Power consumption (in watts)
-    power_t package_power;       // Total package power
-    power_t core_power;          // CPU cores power
+    power_t package_power;      
+    power_t core_power;          
     
-    energy_t package_energy;     // Total package energy consumed
-    energy_t core_energy;        // CPU cores energy consumed
+    energy_t package_energy;    
+    energy_t core_energy;      
     
-    // Temperature (in degrees Celsius)
-    unsigned int package_temp;   // Package temperature
-    unsigned int core_count;     // Number of cores represented (see core_temp_map for temps)
+    unsigned int package_temp;   
+    unsigned int core_count;     
     
-    time_t_ns timestamp;         // Time of measurement
-    time_t_ns delta_time;        // Time elapsed since last measurement
+    time_t_ns timestamp;    
+    time_t_ns delta_time;  
     
     power_t tdp;                 
 };
