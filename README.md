@@ -4,10 +4,10 @@ A custom Linux scheduler using sched_ext (BPF) with RAPL (Running Average Power 
 
 ## Features
 
-- **RAPL Stats Monitor**: BPF-based energy and temperature monitoring with kernel timer (100ms intervals)
+- **RAPL Stats Monitor**: BPF timer that samples Intel RAPL perf counters every 100 ms (per-core temps still synthetic)
 - **FIFO Scheduler**: Simple First-In-First-Out scheduler implementation using sched_ext
 - **BPF Map Integration**: Pinned BPF maps for inter-process communication of energy stats
-- **Round-Robin Scheduler (demo)**: Minimal sched_ext scheduler that time-slices tasks while steering new work toward the coldest CPUs using the synthetic RAPL stats
+- **Round-Robin Scheduler (demo)**: Minimal sched_ext scheduler that time-slices tasks while steering new work toward the coldest CPUs using the live RAPL stats
 
 ## Prerequisites
 
@@ -19,14 +19,38 @@ A custom Linux scheduler using sched_ext (BPF) with RAPL (Running Average Power 
 ### Dependencies
 
 ```bash
+
+# for the cloudlab env:
+# sudo apt update
+# sudo apt install software-properties-common
+# sudo add-apt-repository universe
+# sudo add-apt-repository multiverse
+# sudo apt update
+
 # Ubuntu/Debian
-sudo apt-get install clang llvm libbpf-dev libelf-dev bpftool
+sudo apt install clang llvm libbpf-dev libelf-dev bpftool
 
 # Fedora
 sudo dnf install clang llvm libbpf-devel elfutils-libelf-devel bpftool
 
 # Arch
 sudo pacman -S clang llvm libbpf elfutils bpf
+```
+
+### Ubuntu (CloudLab VM) Kernel Prep
+
+CloudLab images ship an upstream kernel without sched_ext. Run the helper script to build and boot into a sched_ext kernel (override `KERNEL_REF` if you want a different release):
+
+```bash
+cd ~/eascx
+KERNEL_REF=sched_ext-for-6.12 ./scripts/setup/cloudlab_vm.sh
+```
+
+The script installs build dependencies, clones/updates `~/scx-kernel`, builds Debian packages, installs the new kernel and headers, sets the GRUB default entry, builds a matching `bpftool`, and writes a fresh `src/include/vmlinux.h` directly from the built kernel so you can compile immediately. The base kernel config tweaks it applies live in `scx/kernel.config`, so feel free to edit that file before re-running the script. After the machine boots into the sched_ext kernel (`uname -r` shows the new version), regenerate the BTF header from `/sys/kernel/btf/vmlinux` to keep it in sync with the running kernel:
+
+```bash
+cd ~/eascx
+sudo /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/include/vmlinux.h
 ```
 
 ## Setup
@@ -44,13 +68,13 @@ The Makefile expects the headers at `~/scx/scheds/include`. If you clone to a di
 
 ### 2. Generate vmlinux.h
 
-Generate the kernel BTF (BPF Type Format) header:
+Generate the kernel BTF (BPF Type Format) header (skip this if you just ran `scripts/setup/cloudlab_vm.sh`, which already emitted a matching header from the built kernel):
 
 ```bash
 bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/include/vmlinux.h
 ```
 
-This creates a header with all kernel data structures needed for BPF programs.
+This creates a header with all kernel data structures needed for BPF programs. Re-run it whenever you install a new kernel or when `make` reports a missing `src/include/vmlinux.h`.
 
 ## Building
 
@@ -71,7 +95,7 @@ Built binaries will be in the `build/` directory:
 
 ### RAPL Stats Monitor
 
-Start the energy monitoring daemon (updates every 100ms using BPF timer):
+Start the energy monitoring daemon (attaches the BPF timer, which samples Intel RAPL counters every 100 ms while randomizing per-core temps):
 
 ```bash
 # Terminal 1: Start the updater
@@ -87,6 +111,8 @@ Read current energy stats:
 sudo make test-scx
 ```
 
+> **Note:** The RAPL monitor requires Intel RAPL perf events (`/sys/bus/event_source/devices/power`). Load the appropriate drivers (e.g., `intel_rapl_common`, `intel_rapl_msr`) before running the updater.
+
 ### FIFO Scheduler
 
 **⚠️ WARNING**: This replaces your system's scheduler. Test in a safe environment!
@@ -99,7 +125,7 @@ Press Ctrl+C to stop and restore the default scheduler.
 
 ### Round-Robin Scheduler with RAPL Display
 
-This scheduler is a minimal Round-Robin policy (same time slice for every runnable task) that steers wakeups toward the coldest CPUs at the time of scheduling. It logs the synthetic RAPL stats so you can see which CPUs were considered coldest.
+This scheduler is a minimal Round-Robin policy (same time slice for every runnable task) that steers wakeups toward the coldest CPUs at the time of scheduling. It logs the live Intel RAPL stats collected by the BPF timer (per-core temps are still randomized) so you can see which CPUs were considered coldest.
 
 ```bash
 sudo make run-energy
@@ -117,14 +143,14 @@ Press Ctrl+C in the scheduler terminal to stop and detach.
 
 ### RAPL Stats (src/bpf-stats-updater/)
 
-- `repl_stats_interval.bpf.c` - BPF program with kernel timer for stats generation
-- `loader.c` - Userspace loader that pins the BPF map
+- `repl_stats_interval.bpf.c` - BPF timer program that samples Intel RAPL perf counters and updates the stats/temps maps
+- `loader.c` - Userspace loader that pins the maps, wires up the perf event array with the RAPL PMU, and starts the BPF timer (per-core temps remain synthetic)
 - `scx_reader.c` - Example reader for accessing pinned stats
 
 Stats collected:
 - Package/Core power (watts)
 - Package/Core energy (joules)
-- Package/Core temperature (°C)
+- Package temperature plus randomized per-core temperatures (°C)
 - TDP (Thermal Design Power)
 
 ### FIFO Scheduler (src/)

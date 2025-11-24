@@ -1,6 +1,6 @@
 # Cold-Aware Round-Robin Scheduler Demo
 
-The current scheduler remains intentionally minimal, but it now demonstrates how to consume the synthetic RAPL telemetry: every time a task wakes up, the scheduler selects the coldest CPU (round-robin among ties) before inserting the task into the per-CPU DSQ. All stats continue to be streamed from the kernel via `bpf_printk` so you can validate the plumbing.
+The current scheduler remains intentionally minimal, but it now demonstrates how to consume the live Intel RAPL telemetry sourced from the BPF timer (per-core temps are still synthetic): every time a task wakes up, the scheduler selects the coldest CPU (round-robin among ties) before inserting the task into the per-CPU DSQ. All stats continue to be streamed from the kernel via `bpf_printk` so you can validate the plumbing.
 
 ## Components
 
@@ -15,8 +15,9 @@ The current scheduler remains intentionally minimal, but it now demonstrates how
 ## Prerequisites
 
 1. Linux kernel 6.12+ with sched_ext enabled.
-2. `rapl_stats_updater` running so the pinned stats and temps maps exist and receive fresh random values.
-3. Root privileges (required for sched_ext and map access).
+2. Intel RAPL perf events available via `/sys/bus/event_source/devices/power` (load the `intel_rapl` drivers on bare metal).
+3. `rapl_stats_updater` running so the pinned stats and temps maps exist and receive fresh power readings from the BPF timer (temps remain randomized for now).
+4. Root privileges (required for sched_ext and map access).
 
 ## Building
 
@@ -37,7 +38,7 @@ Relevant build artifacts:
    sudo ./build/rapl_stats_updater
    ```
 
-   This pins the shared maps at `/sys/fs/bpf/rapl_stats` and `/sys/fs/bpf/rapl_temps`, refreshing them every 100 ms with random data.
+   This pins the shared maps at `/sys/fs/bpf/rapl_stats` and `/sys/fs/bpf/rapl_temps`, refreshing them every 100 ms with Intel RAPL power/energy data sourced via perf events (per-core temps stay random).
 
 2. **Attach the Round-Robin scheduler**
 
