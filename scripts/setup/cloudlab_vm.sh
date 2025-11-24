@@ -38,7 +38,7 @@ pushd "${KERNEL_DIR}" >/dev/null
 ./scripts/config --enable CONFIG_DEBUG_INFO
 ./scripts/config --enable CONFIG_DEBUG_INFO_DWARF4
 ./scripts/config --enable CONFIG_DEBUG_INFO_BTF
-yes "" | make olddefconfig
+make olddefconfig
 
 echo "[*] Building kernel packages..."
 make -j"$(nproc)" bindeb-pkg
