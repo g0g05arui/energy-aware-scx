@@ -4,6 +4,27 @@ LLC ?= llc
 CC ?= gcc
 
 KERNEL_VERSION := $(shell uname -r)
+UNAME_M := $(shell uname -m)
+
+ifeq ($(BPF_TARGET_ARCH),)
+  ifeq ($(UNAME_M),x86_64)
+    BPF_TARGET_ARCH := x86
+  else ifeq ($(UNAME_M),aarch64)
+    BPF_TARGET_ARCH := arm64
+  else
+    $(error Unsupported architecture $(UNAME_M). Set BPF_TARGET_ARCH to a valid __TARGET_ARCH_* value)
+  endif
+endif
+
+ifeq ($(SYS_INCLUDE_DIR),)
+  ifeq ($(UNAME_M),x86_64)
+    SYS_INCLUDE_DIR := /usr/include/x86_64-linux-gnu
+  else ifeq ($(UNAME_M),aarch64)
+    SYS_INCLUDE_DIR := /usr/include/aarch64-linux-gnu
+  else
+    SYS_INCLUDE_DIR := /usr/include
+  endif
+endif
 
 SCX_INCLUDE ?= $(HOME)/scx/scheds/include
 
@@ -11,9 +32,9 @@ SRC_DIR = src/bpf-stats-updater
 INCLUDE_DIR = src/include
 BUILD_DIR = build
 
-BPF_CFLAGS = -O2 -g -target bpf -D__TARGET_ARCH_arm64 \
+BPF_CFLAGS = -O2 -g -target bpf -D__TARGET_ARCH_$(BPF_TARGET_ARCH) \
 	-I$(INCLUDE_DIR) \
-	-I/usr/include/aarch64-linux-gnu \
+	-I$(SYS_INCLUDE_DIR) \
 	-I/usr/src/linux-headers-$(KERNEL_VERSION)/tools/lib/bpf \
 	-I/usr/src/linux-headers-$(KERNEL_VERSION)/tools/bpf/resolve_btfids/libbpf/include
 
