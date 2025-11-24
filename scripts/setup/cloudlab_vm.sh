@@ -13,11 +13,9 @@ KERNEL_DIR="${KERNEL_DIR:-${CALLER_HOME}/scx-kernel}"
 KERNEL_REF="${KERNEL_REF:-sched_ext-for-6.14}"
 APT_PACKAGES=(build-essential bc flex bison libssl-dev libelf-dev libncurses-dev dwarves libcap-dev pkg-config fakeroot jq wget)
 
-echo "[*] Installing build dependencies..."
 sudo apt update
 sudo apt install -y "${APT_PACKAGES[@]}"
 
-echo "[*] Ensuring sched_ext kernel tree exists..."
 if [[ ! -d "${KERNEL_DIR}" ]]; then
 	git clone https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git "${KERNEL_DIR}"
 else
@@ -35,7 +33,6 @@ if [[ ! -f "${BOOT_CONFIG}" ]]; then
 	exit 1
 fi
 
-echo "[*] Preparing kernel configuration..."
 cp "${BOOT_CONFIG}" "${KERNEL_DIR}/.config"
 cat "${SCX_CONFIG}" >> "${KERNEL_DIR}/.config"
 
@@ -47,7 +44,6 @@ pushd "${KERNEL_DIR}" >/dev/null
 ./scripts/config --enable CONFIG_DEBUG_INFO_BTF
 make olddefconfig
 
-echo "[*] Building kernel packages..."
 make -j"$(nproc)" bindeb-pkg
 
 KERNEL_RELEASE="$(make -s kernelrelease)"
@@ -59,15 +55,12 @@ if [[ -z "${IMAGE_DEB}" || -z "${HEADERS_DEB}" ]]; then
 	exit 1
 fi
 
-echo "[*] Installing kernel packages..."
 sudo apt install -y --allow-downgrades "${IMAGE_DEB}" "${HEADERS_DEB}"
 
 GRUB_ENTRY="Advanced options for Ubuntu>Ubuntu, with Linux ${KERNEL_RELEASE}"
-echo "[*] Setting GRUB default to ${GRUB_ENTRY}"
 sudo sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"${GRUB_ENTRY}\"|" /etc/default/grub
 sudo update-grub
 
-echo "[*] Building bpftool from the kernel tree..."
 pushd tools/bpf/bpftool >/dev/null
 make -j"$(nproc)"
 sudo cp ./bpftool /usr/local/bin/bpftool
@@ -79,7 +72,6 @@ SCX_INCLUDE="${SCX_INCLUDE:-${CALLER_HOME}/scx/scheds/include}"
 SCX_VMLINUX="${SCX_INCLUDE}/scx/vmlinux.h"
 mkdir -p "$(dirname "${VMLINUX_HDR}")"
 
-echo "[*] Generating ${VMLINUX_HDR} from ${VMLINUX_SRC}..."
 if [[ -f "${VMLINUX_SRC}" ]]; then
 	/usr/local/bin/bpftool btf dump file "${VMLINUX_SRC}" format c > "${VMLINUX_HDR}"
 	if [[ -d "$(dirname "${SCX_VMLINUX}")" ]]; then
@@ -93,14 +85,3 @@ else
 fi
 
 popd >/dev/null
-
-cat <<EOF
-
-======================================================================
-Kernel ${KERNEL_RELEASE} installed and src/include/vmlinux.h updated
-from the built tree. Reboot to use it. After booting into the new
-kernel, you can regenerate the header directly from /sys/kernel/btf to
-keep it in sync:
-  sudo /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/include/vmlinux.h
-======================================================================
-EOF
