@@ -118,10 +118,12 @@ static void close_perf_events(int *fds, size_t count)
 int main(int argc, char **argv)
 {
     struct bpf_object *obj;
-    struct bpf_program *prog;
+    struct bpf_program *start_prog = NULL;
+    struct bpf_link *start_link = NULL;
     int stats_map_fd;
     int temps_map_fd;
     int config_map_fd;
+    int timer_state_fd;
     int perf_map_fd;
     int err;
     int perf_fds[PERF_EVENT_COUNT] = { [0 ... (PERF_EVENT_COUNT - 1)] = -1 };
@@ -187,6 +189,12 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
+    timer_state_fd = bpf_object__find_map_fd_by_name(obj, "timer_state_map");
+    if (timer_state_fd < 0) {
+        fprintf(stderr, "ERROR: failed to find timer_state_map\n");
+        goto cleanup;
+    }
+
     const char *stats_pin_path = "/sys/fs/bpf/rapl_stats";
     const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
     err = bpf_obj_pin(stats_map_fd, stats_pin_path);
@@ -234,24 +242,36 @@ int main(int argc, char **argv)
                     strerror(errno));
     }
 
-    prog = bpf_object__find_program_by_name(obj, "start_timer");
-    if (!prog) {
+    start_prog = bpf_object__find_program_by_name(obj, "start_timer");
+    if (!start_prog) {
         fprintf(stderr, "ERROR: failed to find start_timer program\n");
         goto cleanup;
     }
 
-    int timer_prog_fd = bpf_program__fd(prog);
-    if (timer_prog_fd < 0) {
-        fprintf(stderr, "ERROR: failed to get program fd\n");
+    start_link = bpf_program__attach_tracepoint(start_prog, "sched", "sched_switch");
+    if (libbpf_get_error(start_link)) {
+        int attach_err = -libbpf_get_error(start_link);
+        fprintf(stderr, "ERROR: failed to attach start_timer program: %s\n",
+                strerror(attach_err));
+        start_link = NULL;
         goto cleanup;
     }
 
-    LIBBPF_OPTS(bpf_test_run_opts, opts);
-    err = bpf_prog_test_run_opts(timer_prog_fd, &opts);
-    if (err || opts.retval) {
-        fprintf(stderr, "ERROR: failed to start BPF timer: %d (retval: %d)\n",
-                err, opts.retval);
-        goto cleanup;
+    __u32 key = 0;
+    __u32 started = 0;
+    for (int i = 0; i < 50 && keep_running; i++) {
+        if (!bpf_map_lookup_elem(timer_state_fd, &key, &started) && started) {
+            printf("BPF timer initialized.\n");
+            break;
+        }
+        usleep(20000);
+    }
+    if (!started)
+        fprintf(stderr, "WARNING: BPF timer did not start within timeout\n");
+
+    if (start_link) {
+        bpf_link__destroy(start_link);
+        start_link = NULL;
     }
 
     printf("RAPL Stats Updater streaming Intel RAPL data every 100ms (BPF timer)\n");
@@ -269,6 +289,8 @@ int main(int argc, char **argv)
 
 cleanup:
     close_perf_events(perf_fds, PERF_EVENT_COUNT);
+    if (start_link)
+        bpf_link__destroy(start_link);
     if (obj)
         bpf_object__close(obj);
     return err != 0;

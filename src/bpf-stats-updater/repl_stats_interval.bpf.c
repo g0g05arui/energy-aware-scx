@@ -50,6 +50,13 @@ struct {
     __type(value, struct timer_wrapper);
 } timer_map SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} timer_state_map SEC(".maps");
+
 static __u64 seed = 12345;
 static __u64 last_pkg_energy;
 static __u64 last_core_energy;
@@ -155,12 +162,18 @@ out:
     return 0;
 }
 
-SEC("syscall")
+SEC("tracepoint/sched/sched_switch")
 int start_timer(void *ctx)
 {
     __u32 key = 0;
     struct timer_wrapper *tw;
+    __u32 started = 1;
+    __u32 *state;
     int ret;
+
+    state = bpf_map_lookup_elem(&timer_state_map, &key);
+    if (state && *state)
+        return 0;
 
     tw = bpf_map_lookup_elem(&timer_map, &key);
     if (!tw)
@@ -175,5 +188,7 @@ int start_timer(void *ctx)
         return ret;
 
     ret = bpf_timer_start(&tw->timer, SAMPLE_INTERVAL_NS, 0);
+    if (!ret)
+        bpf_map_update_elem(&timer_state_map, &key, &started, BPF_ANY);
     return ret;
 }
