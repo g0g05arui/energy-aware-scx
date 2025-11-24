@@ -50,6 +50,7 @@ SCX_FIFO_BPF = $(BUILD_DIR)/scx_fifo.bpf.o
 SCX_FIFO_BIN = $(BUILD_DIR)/scx_fifo
 ENERGY_BPF_OBJ = $(BUILD_DIR)/scx_energy_aware.bpf.o
 ENERGY_LOADER = $(BUILD_DIR)/scx_energy_aware
+SCX_VMLINUX = $(INCLUDE_DIR)/vmlinux.h
 
 .PHONY: all clean
 
@@ -70,7 +71,7 @@ $(SCX_READER): $(SRC_DIR)/scx_reader.c $(INCLUDE_DIR)/rapl_stats.h
 	$(CC) $(CFLAGS) $(SRC_DIR)/scx_reader.c -o $(SCX_READER) $(LDFLAGS)
 	@echo "SCX reader built: $(SCX_READER)"
 
-$(SCX_FIFO_BPF): src/scx_fifo.bpf.c
+$(SCX_FIFO_BPF): src/scx_fifo.bpf.c $(SCX_VMLINUX)
 	$(CLANG) $(BPF_SCX_CFLAGS) -c src/scx_fifo.bpf.c -o $(SCX_FIFO_BPF)
 	@echo "FIFO scheduler BPF object built: $(SCX_FIFO_BPF)"
 
@@ -78,7 +79,7 @@ $(SCX_FIFO_BIN): src/scx_fifo_loader.c $(SCX_FIFO_BPF)
 	$(CC) $(CFLAGS) src/scx_fifo_loader.c -o $(SCX_FIFO_BIN) $(LDFLAGS)
 	@echo "FIFO scheduler loader built: $(SCX_FIFO_BIN)"
 
-$(ENERGY_BPF_OBJ): src/scx_energy_aware.bpf.c $(INCLUDE_DIR)/rapl_stats.h
+$(ENERGY_BPF_OBJ): src/scx_energy_aware.bpf.c $(INCLUDE_DIR)/rapl_stats.h $(SCX_VMLINUX)
 	$(CLANG) $(BPF_SCX_CFLAGS) -c src/scx_energy_aware.bpf.c -o $(ENERGY_BPF_OBJ)
 	@echo "Energy-Aware scheduler BPF object built: $(ENERGY_BPF_OBJ)"
 
@@ -105,6 +106,11 @@ run-energy: all
 clean:
 	rm -rf $(BUILD_DIR)
 	@echo "Clean complete"
+
+$(SCX_VMLINUX):
+	@echo "Missing $(SCX_VMLINUX)." >&2
+	@echo "Generate it with 'sudo /usr/local/bin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > $(SCX_VMLINUX)' or rerun scripts/setup/cloudlab_vm.sh." >&2
+	@exit 1
 
 install-deps:
 	@echo "Installing dependencies..."
