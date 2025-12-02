@@ -42,7 +42,9 @@ fi
 # Keep a copy of the repo kernel config in the sched_ext tree for convenience.
 if [[ -f "${DEFAULT_SCX_CONFIG}" ]]; then
 	mkdir -p "${KERNEL_DIR}"
-	cp "${DEFAULT_SCX_CONFIG}" "${KERNEL_DIR}/kernel.config"
+	if [[ ! "${DEFAULT_SCX_CONFIG}" -ef "${KERNEL_DIR}/kernel.config" ]]; then
+		cp "${DEFAULT_SCX_CONFIG}" "${KERNEL_DIR}/kernel.config"
+	fi
 fi
 
 if [[ ! -f "${BOOT_CONFIG}" ]]; then
