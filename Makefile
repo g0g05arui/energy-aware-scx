@@ -4,6 +4,27 @@ LLC ?= llc
 CC ?= gcc
 
 KERNEL_VERSION := $(shell uname -r)
+UNAME_M := $(shell uname -m)
+
+ifeq ($(BPF_TARGET_ARCH),)
+  ifeq ($(UNAME_M),x86_64)
+    BPF_TARGET_ARCH := x86
+  else ifeq ($(UNAME_M),aarch64)
+    BPF_TARGET_ARCH := arm64
+  else
+    $(error Unsupported architecture $(UNAME_M). Set BPF_TARGET_ARCH manually)
+  endif
+endif
+
+ifeq ($(SYS_INCLUDE_DIR),)
+  ifeq ($(UNAME_M),x86_64)
+    SYS_INCLUDE_DIR := /usr/include/x86_64-linux-gnu
+  else ifeq ($(UNAME_M),aarch64)
+    SYS_INCLUDE_DIR := /usr/include/aarch64-linux-gnu
+  else
+    SYS_INCLUDE_DIR := /usr/include
+  endif
+endif
 
 SCX_INCLUDE ?= $(HOME)/scx/scheds/include
 
@@ -11,9 +32,9 @@ SRC_DIR = src/bpf-stats-updater
 INCLUDE_DIR = src/include
 BUILD_DIR = build
 
-BPF_CFLAGS = -O2 -g -target bpf -D__TARGET_ARCH_arm64 \
+BPF_CFLAGS = -O2 -g -target bpf -D__TARGET_ARCH_$(BPF_TARGET_ARCH) \
 	-I$(INCLUDE_DIR) \
-	-I/usr/include/aarch64-linux-gnu \
+	-I$(SYS_INCLUDE_DIR) \
 	-I/usr/src/linux-headers-$(KERNEL_VERSION)/tools/lib/bpf \
 	-I/usr/src/linux-headers-$(KERNEL_VERSION)/tools/bpf/resolve_btfids/libbpf/include
 
@@ -29,10 +50,11 @@ SCX_FIFO_BPF = $(BUILD_DIR)/scx_fifo.bpf.o
 SCX_FIFO_BIN = $(BUILD_DIR)/scx_fifo
 ENERGY_BPF_OBJ = $(BUILD_DIR)/scx_energy_aware.bpf.o
 ENERGY_LOADER = $(BUILD_DIR)/scx_energy_aware
+RAPL_CONSOLE = $(BUILD_DIR)/rapl_console_reader
 
 .PHONY: all clean
 
-all: $(BUILD_DIR) $(BPF_OBJ) $(USER_BIN) $(SCX_READER) $(SCX_FIFO_BPF) $(SCX_FIFO_BIN) $(ENERGY_BPF_OBJ) $(ENERGY_LOADER)
+all: $(BUILD_DIR) $(BPF_OBJ) $(USER_BIN) $(SCX_READER) $(SCX_FIFO_BPF) $(SCX_FIFO_BIN) $(ENERGY_BPF_OBJ) $(ENERGY_LOADER) $(RAPL_CONSOLE)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -64,6 +86,10 @@ $(ENERGY_BPF_OBJ): src/scx_energy_aware.bpf.c $(INCLUDE_DIR)/rapl_stats.h
 $(ENERGY_LOADER): src/scx_energy_aware_loader.c $(ENERGY_BPF_OBJ)
 	$(CC) $(CFLAGS) src/scx_energy_aware_loader.c -o $(ENERGY_LOADER) $(LDFLAGS)
 	@echo "Energy-Aware scheduler loader built: $(ENERGY_LOADER)"
+
+$(RAPL_CONSOLE): src/rapl_console_reader.c
+	$(CC) $(CFLAGS) src/rapl_console_reader.c -o $(RAPL_CONSOLE)
+	@echo "RAPL console reader built: $(RAPL_CONSOLE)"
 
 run: all
 	@echo "Running RAPL stats updater..."
