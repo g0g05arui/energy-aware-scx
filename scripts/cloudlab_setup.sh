@@ -9,7 +9,7 @@ if [[ -z "${CALLER_HOME}" ]]; then
 	exit 1
 fi
 
-KERNEL_DIR="${KERNEL_DIR:-${CALLER_HOME}/scx-kernel}"
+KERNEL_DIR="${KERNEL_DIR:-${CALLER_HOME}/scx}"
 KERNEL_REF="${KERNEL_REF:-sched_ext-for-6.14}"
 APT_PACKAGES=(build-essential bc flex bison libssl-dev libelf-dev libncurses-dev dwarves libcap-dev pkg-config fakeroot jq wget)
 
