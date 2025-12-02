@@ -26,7 +26,18 @@ echo "[*] Checking out ${KERNEL_REF}..."
 git -C "${KERNEL_DIR}" checkout "${KERNEL_REF}"
 
 BOOT_CONFIG="/boot/config-$(uname -r)"
-SCX_CONFIG="${REPO_ROOT}/scx/kernel.config"
+DEFAULT_SCX_CONFIG="${REPO_ROOT}/scx/kernel.config"
+SCX_CONFIG="${SCX_CONFIG:-${DEFAULT_SCX_CONFIG}}"
+if [[ ! -f "${SCX_CONFIG}" ]]; then
+	ALT_SCX_CONFIG="${KERNEL_DIR}/kernel.config"
+	if [[ -f "${ALT_SCX_CONFIG}" ]]; then
+		echo "[*] Falling back to ${ALT_SCX_CONFIG} for sched_ext config overrides"
+		SCX_CONFIG="${ALT_SCX_CONFIG}"
+	else
+		echo "Missing ${SCX_CONFIG}. Set SCX_CONFIG to a valid kernel.config file." >&2
+		exit 1
+	fi
+fi
 
 if [[ ! -f "${BOOT_CONFIG}" ]]; then
 	echo "Missing ${BOOT_CONFIG}; aborting." >&2
