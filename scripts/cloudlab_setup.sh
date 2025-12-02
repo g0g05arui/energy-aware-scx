@@ -39,6 +39,12 @@ if [[ ! -f "${SCX_CONFIG}" ]]; then
 	fi
 fi
 
+# Keep a copy of the repo kernel config in the sched_ext tree for convenience.
+if [[ -f "${DEFAULT_SCX_CONFIG}" ]]; then
+	mkdir -p "${KERNEL_DIR}"
+	cp "${DEFAULT_SCX_CONFIG}" "${KERNEL_DIR}/kernel.config"
+fi
+
 if [[ ! -f "${BOOT_CONFIG}" ]]; then
 	echo "Missing ${BOOT_CONFIG}; aborting." >&2
 	exit 1
