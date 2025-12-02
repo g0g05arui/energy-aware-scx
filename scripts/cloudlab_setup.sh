@@ -88,15 +88,12 @@ VMLINUX_HDR="${REPO_ROOT}/src/include/vmlinux.h"
 SCX_INCLUDE="${SCX_INCLUDE:-${CALLER_HOME}/scx/scheds/include}"
 SCX_VMLINUX="${SCX_INCLUDE}/scx/vmlinux.h"
 mkdir -p "$(dirname "${VMLINUX_HDR}")"
+mkdir -p "$(dirname "${SCX_VMLINUX}")"
 
 if [[ -f "${VMLINUX_SRC}" ]]; then
 	/usr/local/bin/bpftool btf dump file "${VMLINUX_SRC}" format c > "${VMLINUX_HDR}"
-	if [[ -d "$(dirname "${SCX_VMLINUX}")" ]]; then
-		echo "[*] Syncing vmlinux.h into ${SCX_VMLINUX}"
-		cp "${VMLINUX_HDR}" "${SCX_VMLINUX}"
-	else
-		echo "Warning: ${SCX_INCLUDE}/scx not found; skipped copying vmlinux.h for sched_ext headers." >&2
-	fi
+	echo "[*] Syncing vmlinux.h into ${SCX_VMLINUX}"
+	cp "${VMLINUX_HDR}" "${SCX_VMLINUX}"
 else
 	echo "Warning: ${VMLINUX_SRC} not found; skipping vmlinux.h generation." >&2
 fi
