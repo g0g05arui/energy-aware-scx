@@ -28,3 +28,5 @@ sudo make install
 # Generate vmlinux.h
 cd ~/energy-aware-scx
 bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/include/vmlinux.h
+
+sudo modprobe intel_rapl_msr intel_rapl_common
