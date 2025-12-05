@@ -1,5 +1,6 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
 #include "../include/rapl_stats.h"
 
 char LICENSE[] SEC("license") = "GPL";
@@ -113,3 +114,6 @@ int start_timer(void *ctx)
     
     return ret;
 }
+
+#include "hwmon_stats_interval.bpf.c"
+

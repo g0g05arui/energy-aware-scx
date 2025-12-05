@@ -1,0 +1,52 @@
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 128);
+	__type(key, __s32);
+	__type(value, __u32);
+} thermal_zone_index_map SEC(".maps");
+
+struct thermal_temperature_args {
+	__u64 pad;
+	int temp;             /* milli-degrees Celsius */
+	int trip;
+	int type;
+	int thermal_zone_id;
+};
+
+static __always_inline int handle_thermal_temperature(struct thermal_temperature_args *ctx)
+{
+	__s32 tz_id = ctx->thermal_zone_id;
+	__u32 *p_idx;
+	__u32 idx;
+	__u32 temp_mC = (__u32)ctx->temp;
+
+	/* Debug: raw event */
+	bpf_printk("thermal_temperature: tz_id=%d temp=%u mC trip=%d type=%d\n",
+		   tz_id, temp_mC, ctx->trip, ctx->type);
+
+	p_idx = bpf_map_lookup_elem(&thermal_zone_index_map, &tz_id);
+	if (!p_idx) {
+		bpf_printk("thermal_temperature: tz_id=%d has no mapping, ignoring\n", tz_id);
+		return 0;
+	}
+
+	idx = *p_idx;
+	if (idx >= MAX_CORE_TEMPS) {
+		bpf_printk("thermal_temperature: tz_id=%d mapped idx=%u >= MAX_CORE_TEMPS=%u, ignoring\n",
+			   tz_id, idx, (__u32)MAX_CORE_TEMPS);
+		return 0;
+	}
+
+	bpf_map_update_elem(&core_temp_map, &idx, &temp_mC, BPF_ANY);
+
+	bpf_printk("thermal_temperature: tz_id=%d -> core_idx=%u temp=%u mC stored\n",
+		   tz_id, idx, temp_mC);
+
+	return 0;
+}
+
+SEC("tracepoint/thermal/thermal_temperature")
+int bpf_hwmon_stats_updater(struct thermal_temperature_args *ctx)
+{
+	return handle_thermal_temperature(ctx);
+}

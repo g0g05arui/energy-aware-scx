@@ -8,12 +8,77 @@
 #include <bpf/bpf.h>
 #include <sys/resource.h>
 #include <time.h>
+#include <dirent.h>
+#include <string.h>
+
 #include "../include/rapl_stats.h"
 
 static volatile int keep_running = 1;
 
 void sig_handler(int signo) {
     keep_running = 0;
+}
+
+/*
+ * Build a simple mapping:
+ *   thermal_zoneN  -> index = 0,1,2,... < MAX_CORE_TEMPS
+ *
+ * We assume the tracepoint thermal_temperature's thermal_zone_id == N.
+ * This fills the BPF HASH map 'thermal_zone_index_map' that lives in the BPF object.
+ *
+ * out_mapped will contain the number of zones mapped (can be used as core_count).
+ */
+static int build_thermal_zone_mapping(int tz_map_fd, int *out_mapped)
+{
+    DIR *dir;
+    struct dirent *de;
+    int idx = 0;
+
+    dir = opendir("/sys/class/thermal");
+    if (!dir) {
+        fprintf(stderr, "WARNING: failed to open /sys/class/thermal: %s\n",
+                strerror(errno));
+        return -1;
+    }
+
+    while ((de = readdir(dir)) != NULL) {
+        int tz_id;
+
+        if (sscanf(de->d_name, "thermal_zone%d", &tz_id) != 1)
+            continue;
+
+        if (idx >= MAX_CORE_TEMPS) {
+            fprintf(stderr,
+                    "INFO: reached MAX_CORE_TEMPS=%d, ignoring extra zones\n",
+                    MAX_CORE_TEMPS);
+            break;
+        }
+
+        __s32 key = tz_id;
+        __u32 val = idx;
+
+        if (bpf_map_update_elem(tz_map_fd, &key, &val, BPF_ANY)) {
+            fprintf(stderr,
+                    "WARNING: failed to update thermal_zone_index_map for tz_id=%d idx=%d: %s\n",
+                    tz_id, idx, strerror(errno));
+            continue;
+        }
+
+        printf("Mapped thermal_zone%d -> core_temp_map[%d]\n", tz_id, idx);
+        idx++;
+    }
+
+    closedir(dir);
+
+    if (out_mapped)
+        *out_mapped = idx;
+
+    if (idx == 0) {
+        fprintf(stderr,
+                "WARNING: no thermal zones mapped; temps may remain unused\n");
+    }
+
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -23,8 +88,10 @@ int main(int argc, char **argv) {
     int stats_map_fd;
     int temps_map_fd;
     int config_map_fd;
+    int tz_map_fd;
     int timer_prog_fd;
     int err;
+    int mapped_zones = 0;
     
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -44,6 +111,15 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
+    /* Optional: find and build thermal_zone_id -> core_temp_map index mapping */
+    tz_map_fd = bpf_object__find_map_fd_by_name(obj, "thermal_zone_index_map");
+    if (tz_map_fd >= 0) {
+        printf("Found thermal_zone_index_map, building zone->index mapping...\n");
+        build_thermal_zone_mapping(tz_map_fd, &mapped_zones);
+    } else {
+        printf("No thermal_zone_index_map in this object (ok if not using hwmon_stats_updater).\n");
+    }
+
     config_map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_config_map");
     if (config_map_fd >= 0) {
         __u32 cfg_key = 0;
@@ -51,12 +127,21 @@ int main(int argc, char **argv) {
         long cpu_cnt = sysconf(_SC_NPROCESSORS_ONLN);
         if (cpu_cnt < 1)
             cpu_cnt = 1;
+
+        /* If we have mapped zones, prefer that as an upper bound for core_count */
+        if (mapped_zones > 0 && mapped_zones < cpu_cnt)
+            cpu_cnt = mapped_zones;
+
         if (cpu_cnt > MAX_CORE_TEMPS)
             cpu_cnt = MAX_CORE_TEMPS;
+
         cfg.core_count = cpu_cnt;
         if (bpf_map_update_elem(config_map_fd, &cfg_key, &cfg, BPF_ANY))
             fprintf(stderr, "WARNING: failed to set core_count config: %s\n",
                     strerror(errno));
+        else
+            printf("Configured core_count=%ld (mapped_zones=%d)\n",
+                   cpu_cnt, mapped_zones);
     } else {
         fprintf(stderr, "WARNING: rapl_config_map not found, using defaults\n");
     }
