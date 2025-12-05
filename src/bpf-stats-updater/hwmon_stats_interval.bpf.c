@@ -39,9 +39,13 @@ struct thermal_temperature_args {
 static __always_inline int handle_thermal_temperature(struct thermal_temperature_args *ctx)
 {
 	__s32 tz_id = ctx->id;
-	__u32 temp_mC = (__u32)ctx->temp;
+	int temp = ctx->temp;
 	__u32 *p_idx;
 	__u32 idx;
+	int ret;
+
+	if (temp <= 0)
+		return 0;
 
 	p_idx = bpf_map_lookup_elem(&thermal_zone_index_map, &tz_id);
 	if (!p_idx)
@@ -51,7 +55,11 @@ static __always_inline int handle_thermal_temperature(struct thermal_temperature
 	if (idx >= MAX_CORE_TEMPS)
 		return 0;
 
-	bpf_map_update_elem(&core_temp_map, &idx, &temp_mC, BPF_ANY);
+	ret = bpf_map_update_elem(&core_temp_map, &idx, &temp, BPF_ANY);
+	if (ret)
+		bpf_printk("temp update failed tz=%d idx=%u err=%d", tz_id, idx, ret);
+	else
+		bpf_printk("temp update tz=%d idx=%u temp=%d", tz_id, idx, temp);
 	return 0;
 }
 
