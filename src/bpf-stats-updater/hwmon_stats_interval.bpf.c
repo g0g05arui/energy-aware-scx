@@ -34,15 +34,17 @@ static __always_inline int handle_thermal_temperature(struct thermal_temperature
 	__s32 tz_id = ctx->thermal_zone_id;
 	__u32 temp_mC = (__u32)ctx->temp;
 	__u32 *p_idx;
+	__u32 idx;
 
 	p_idx = bpf_map_lookup_elem(&thermal_zone_index_map, &tz_id);
 	if (!p_idx)
 		return 0;
 
-	if (*p_idx >= MAX_CORE_TEMPS)
+	idx = *p_idx;
+	if (idx >= MAX_CORE_TEMPS)
 		return 0;
 
-	bpf_map_update_elem(&core_temp_map, p_idx, &temp_mC, BPF_ANY);
+	bpf_map_update_elem(&core_temp_map, &idx, &temp_mC, BPF_ANY);
 	return 0;
 }
 
