@@ -21,17 +21,24 @@ struct {
 	__type(value, __u32);
 } thermal_zone_index_map SEC(".maps");
 
+struct trace_entry {
+	__u16 type;
+	__u8 flags;
+	__u8 preempt_count;
+	__s32 pid;
+};
+
 struct thermal_temperature_args {
-	__u64 pad;
+	struct trace_entry ent;
+	__u32 data_loc_thermal_zone;
+	int id;
+	int temp_prev;
 	int temp;
-	int trip;
-	int type;
-	int thermal_zone_id;
 };
 
 static __always_inline int handle_thermal_temperature(struct thermal_temperature_args *ctx)
 {
-	__s32 tz_id = ctx->thermal_zone_id;
+	__s32 tz_id = ctx->id;
 	__u32 temp_mC = (__u32)ctx->temp;
 	__u32 *p_idx;
 	__u32 idx;
