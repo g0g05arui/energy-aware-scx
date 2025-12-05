@@ -19,13 +19,6 @@ struct {
     __type(value, struct rapl_config);
 } rapl_config_map SEC(".maps");
 
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, MAX_CORE_TEMPS);
-    __type(key, __u32);
-    __type(value, __u32);
-} core_temp_map SEC(".maps");
-
 struct timer_wrapper {
     struct bpf_timer timer;
 };
@@ -75,14 +68,6 @@ static int timer_callback(void *map, int *key, struct bpf_timer *timer)
     
     stats->package_temp = rand_range(40, 85);
     stats->core_count = core_count;
-#pragma clang loop unroll(disable)
-    for (int i = 0; i < MAX_CORE_TEMPS; i++) {
-        if (i >= core_count)
-            break;
-        __u32 idx = i;
-        __u32 temp = rand_range(38, 82);
-        bpf_map_update_elem(&core_temp_map, &idx, &temp, BPF_ANY);
-    }
     
     stats->tdp = rand_range(35, 125);
     
@@ -114,6 +99,3 @@ int start_timer(void *ctx)
     
     return ret;
 }
-
-#include "hwmon_stats_interval.bpf.c"
-

@@ -12,73 +12,12 @@
 #include <string.h>
 
 #include "../include/rapl_stats.h"
+#include "thermal_zone_helpers.h"
 
 static volatile int keep_running = 1;
 
 void sig_handler(int signo) {
     keep_running = 0;
-}
-
-/*
- * Build a simple mapping:
- *   thermal_zoneN  -> index = 0,1,2,... < MAX_CORE_TEMPS
- *
- * We assume the tracepoint thermal_temperature's thermal_zone_id == N.
- * This fills the BPF HASH map 'thermal_zone_index_map' that lives in the BPF object.
- *
- * out_mapped will contain the number of zones mapped (can be used as core_count).
- */
-static int build_thermal_zone_mapping(int tz_map_fd, int *out_mapped)
-{
-    DIR *dir;
-    struct dirent *de;
-    int idx = 0;
-
-    dir = opendir("/sys/class/thermal");
-    if (!dir) {
-        fprintf(stderr, "WARNING: failed to open /sys/class/thermal: %s\n",
-                strerror(errno));
-        return -1;
-    }
-
-    while ((de = readdir(dir)) != NULL) {
-        int tz_id;
-
-        if (sscanf(de->d_name, "thermal_zone%d", &tz_id) != 1)
-            continue;
-
-        if (idx >= MAX_CORE_TEMPS) {
-            fprintf(stderr,
-                    "INFO: reached MAX_CORE_TEMPS=%d, ignoring extra zones\n",
-                    MAX_CORE_TEMPS);
-            break;
-        }
-
-        __s32 key = tz_id;
-        __u32 val = idx;
-
-        if (bpf_map_update_elem(tz_map_fd, &key, &val, BPF_ANY)) {
-            fprintf(stderr,
-                    "WARNING: failed to update thermal_zone_index_map for tz_id=%d idx=%d: %s\n",
-                    tz_id, idx, strerror(errno));
-            continue;
-        }
-
-        printf("Mapped thermal_zone%d -> core_temp_map[%d]\n", tz_id, idx);
-        idx++;
-    }
-
-    closedir(dir);
-
-    if (out_mapped)
-        *out_mapped = idx;
-
-    if (idx == 0) {
-        fprintf(stderr,
-                "WARNING: no thermal zones mapped; temps may remain unused\n");
-    }
-
-    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -92,6 +31,8 @@ int main(int argc, char **argv) {
     int timer_prog_fd;
     int err;
     int mapped_zones = 0;
+    bool stats_map_pinned = false;
+    bool temps_map_pinned = false;
     
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -113,12 +54,11 @@ int main(int argc, char **argv) {
 
     /* Optional: find and build thermal_zone_id -> core_temp_map index mapping */
     tz_map_fd = bpf_object__find_map_fd_by_name(obj, "thermal_zone_index_map");
-    if (tz_map_fd >= 0) {
+    if (tz_map_fd >= 0)
         printf("Found thermal_zone_index_map, building zone->index mapping...\n");
-        build_thermal_zone_mapping(tz_map_fd, &mapped_zones);
-    } else {
-        printf("No thermal_zone_index_map in this object (ok if not using hwmon_stats_updater).\n");
-    }
+    else
+        printf("No thermal_zone_index_map in this object (ok if temps are updated elsewhere).\n");
+    build_thermal_zone_mapping(tz_map_fd, &mapped_zones);
 
     config_map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_config_map");
     if (config_map_fd >= 0) {
@@ -152,12 +92,6 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    temps_map_fd = bpf_object__find_map_fd_by_name(obj, "core_temp_map");
-    if (temps_map_fd < 0) {
-        fprintf(stderr, "ERROR: failed to find core_temp_map\n");
-        goto cleanup;
-    }
-    
     const char *stats_pin_path = "/sys/fs/bpf/rapl_stats";
     const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
     err = bpf_obj_pin(stats_map_fd, stats_pin_path);
@@ -165,13 +99,20 @@ int main(int argc, char **argv) {
         fprintf(stderr, "WARNING: failed to pin map to %s: %s\n", stats_pin_path, strerror(errno));
     } else {
         printf("BPF map pinned to: %s\n", stats_pin_path);
+        stats_map_pinned = true;
     }
 
-    err = bpf_obj_pin(temps_map_fd, temps_pin_path);
-    if (err && errno != EEXIST) {
-        fprintf(stderr, "WARNING: failed to pin map to %s: %s\n", temps_pin_path, strerror(errno));
+    temps_map_fd = bpf_object__find_map_fd_by_name(obj, "core_temp_map");
+    if (temps_map_fd >= 0) {
+        err = bpf_obj_pin(temps_map_fd, temps_pin_path);
+        if (err && errno != EEXIST) {
+            fprintf(stderr, "WARNING: failed to pin map to %s: %s\n", temps_pin_path, strerror(errno));
+        } else {
+            printf("BPF map pinned to: %s\n", temps_pin_path);
+            temps_map_pinned = true;
+        }
     } else {
-        printf("BPF map pinned to: %s\n", temps_pin_path);
+        printf("No core_temp_map in this object; run the dedicated HWMON loader to populate temps.\n");
     }
     
     prog = bpf_object__find_program_by_name(obj, "start_timer");
@@ -195,7 +136,11 @@ int main(int argc, char **argv) {
     
     printf("RAPL Stats Updater started with BPF timer (100ms interval)\n");
     printf("SCX can read stats from BPF map at: %s\n", stats_pin_path);
-    printf("Per-core temps available at: %s\n", temps_pin_path);
+    if (temps_map_pinned)
+        printf("Per-core temps available at: %s\n", temps_pin_path);
+    else
+        printf("Per-core temps available at: %s (run hwmon_stats_updater to populate)\n",
+               temps_pin_path);
     printf("Press Ctrl+C to stop.\n\n");
     
     while (keep_running) {
@@ -204,8 +149,10 @@ int main(int argc, char **argv) {
     
     printf("\n\nStopping...\n");
     
-    unlink("/sys/fs/bpf/rapl_stats");
-    unlink("/sys/fs/bpf/rapl_temps");
+    if (stats_map_pinned)
+        unlink("/sys/fs/bpf/rapl_stats");
+    if (temps_map_pinned)
+        unlink("/sys/fs/bpf/rapl_temps");
     
 cleanup:
     if (link)

@@ -44,7 +44,9 @@ CFLAGS = -O2 -Wall -I$(INCLUDE_DIR)
 LDFLAGS = -lbpf -lelf -lz
 
 BPF_OBJ = $(BUILD_DIR)/repl_stats_interval.bpf.o
+HWMON_BPF_OBJ = $(BUILD_DIR)/hwmon_stats_interval.bpf.o
 USER_BIN = $(BUILD_DIR)/rapl_stats_updater
+HWMON_LOADER = $(BUILD_DIR)/hwmon_stats_updater
 SCX_READER = $(BUILD_DIR)/scx_reader
 SCX_FIFO_BPF = $(BUILD_DIR)/scx_fifo.bpf.o
 SCX_FIFO_BIN = $(BUILD_DIR)/scx_fifo
@@ -56,7 +58,7 @@ HWMON_READER = $(BUILD_DIR)/hwmon_console_reader
 
 .PHONY: all clean
 
-all: $(BUILD_DIR) $(BPF_OBJ) $(USER_BIN) $(SCX_READER) $(SCX_FIFO_BPF) $(SCX_FIFO_BIN) $(ENERGY_BPF_OBJ) $(ENERGY_LOADER) $(RAPL_CONSOLE) $(HWMON_READER)
+all: $(BUILD_DIR) $(BPF_OBJ) $(HWMON_BPF_OBJ) $(USER_BIN) $(HWMON_LOADER) $(SCX_READER) $(SCX_FIFO_BPF) $(SCX_FIFO_BIN) $(ENERGY_BPF_OBJ) $(ENERGY_LOADER) $(RAPL_CONSOLE) $(HWMON_READER)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -65,9 +67,17 @@ $(BPF_OBJ): $(SRC_DIR)/repl_stats_interval.bpf.c $(INCLUDE_DIR)/rapl_stats.h
 	$(CLANG) $(BPF_CFLAGS) -c $(SRC_DIR)/repl_stats_interval.bpf.c -o $(BPF_OBJ)
 	@echo "BPF object built: $(BPF_OBJ)"
 
-$(USER_BIN): $(SRC_DIR)/loader.c $(INCLUDE_DIR)/rapl_stats.h $(BPF_OBJ)
+$(HWMON_BPF_OBJ): $(SRC_DIR)/hwmon_stats_interval.bpf.c $(INCLUDE_DIR)/rapl_stats.h
+	$(CLANG) $(BPF_CFLAGS) -c $(SRC_DIR)/hwmon_stats_interval.bpf.c -o $(HWMON_BPF_OBJ)
+	@echo "HWMON BPF object built: $(HWMON_BPF_OBJ)"
+
+$(USER_BIN): $(SRC_DIR)/loader.c $(SRC_DIR)/thermal_zone_helpers.h $(INCLUDE_DIR)/rapl_stats.h $(BPF_OBJ)
 	$(CC) $(CFLAGS) $(SRC_DIR)/loader.c -o $(USER_BIN) $(LDFLAGS)
 	@echo "Userspace program built: $(USER_BIN)"
+
+$(HWMON_LOADER): $(SRC_DIR)/hwmon_loader.c $(SRC_DIR)/thermal_zone_helpers.h $(HWMON_BPF_OBJ)
+	$(CC) $(CFLAGS) $(SRC_DIR)/hwmon_loader.c -o $(HWMON_LOADER) $(LDFLAGS)
+	@echo "HWMON stats loader built: $(HWMON_LOADER)"
 
 $(SCX_READER): $(SRC_DIR)/scx_reader.c $(INCLUDE_DIR)/rapl_stats.h
 	$(CC) $(CFLAGS) $(SRC_DIR)/scx_reader.c -o $(SCX_READER) $(LDFLAGS)
