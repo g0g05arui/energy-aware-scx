@@ -5,18 +5,53 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <dirent.h>
+#include <limits.h>
 #include <errno.h>
 #include <string.h>
 #include <bpf/bpf.h>
 
 #include "../include/rapl_stats.h"
 
-static inline int build_thermal_zone_mapping(int tz_map_fd, int *out_mapped)
+static inline int seed_temp_entry(int temps_map_fd, __u32 idx, int tz_id)
+{
+	char temp_path[PATH_MAX];
+	FILE *fp;
+	long val;
+
+	snprintf(temp_path, sizeof(temp_path),
+		 "/sys/class/thermal/thermal_zone%d/temp", tz_id);
+	fp = fopen(temp_path, "r");
+	if (!fp)
+		return -errno;
+
+	if (fscanf(fp, "%ld", &val) != 1) {
+		fclose(fp);
+		return -EIO;
+	}
+	fclose(fp);
+
+	if (val < 0)
+		val = 0;
+
+	__u32 temp_u32 = (__u32)val;
+	if (bpf_map_update_elem(temps_map_fd, &idx, &temp_u32, BPF_ANY)) {
+		fprintf(stderr,
+			"WARNING: failed to seed temp for thermal_zone%d idx=%u: %s\n",
+			tz_id, idx, strerror(errno));
+		return -errno;
+	}
+
+	return 0;
+}
+
+static inline int build_thermal_zone_mapping(int tz_map_fd, int temps_map_fd,
+					     int *out_mapped)
 {
 	DIR *dir;
 	struct dirent *de;
-	int idx = 0;
-	bool update_map = tz_map_fd >= 0;
+    int idx = 0;
+    bool update_map = tz_map_fd >= 0;
+    bool prime_temps = temps_map_fd >= 0;
 
 	dir = opendir("/sys/class/thermal");
 	if (!dir) {
@@ -38,16 +73,19 @@ static inline int build_thermal_zone_mapping(int tz_map_fd, int *out_mapped)
 			break;
 		}
 
-		if (update_map) {
-			__s32 key = tz_id;
-			__u32 val = idx;
+        if (update_map) {
+            __s32 key = tz_id;
+            __u32 val = idx;
 
 			if (bpf_map_update_elem(tz_map_fd, &key, &val, BPF_ANY)) {
 				fprintf(stderr,
 					"WARNING: failed to update thermal_zone_index_map for tz_id=%d idx=%d: %s\n",
 					tz_id, idx, strerror(errno));
 				continue;
-			}
+        }
+
+        if (prime_temps)
+            seed_temp_entry(temps_map_fd, idx, tz_id);
 
 			printf("Mapped thermal_zone%d -> core_temp_map[%d]\n",
 			       tz_id, idx);
@@ -66,7 +104,7 @@ static inline int build_thermal_zone_mapping(int tz_map_fd, int *out_mapped)
 			"WARNING: no thermal zones processed; temps may remain unused\n");
 	}
 
-	return 0;
+    return 0;
 }
 
 #endif /* THERMAL_ZONE_HELPERS_H */

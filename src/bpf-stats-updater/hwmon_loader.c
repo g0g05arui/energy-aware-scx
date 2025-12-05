@@ -70,7 +70,7 @@ int main(int argc, char **argv)
 	}
 
 	printf("Building thermal zone -> core index mapping...\n");
-	build_thermal_zone_mapping(tz_map_fd, &mapped_zones);
+	build_thermal_zone_mapping(tz_map_fd, temps_map_fd, &mapped_zones);
 
 	prog = bpf_object__find_program_by_name(obj, "bpf_hwmon_stats_updater");
 	if (!prog) {

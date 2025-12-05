@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
         printf("Found thermal_zone_index_map, building zone->index mapping...\n");
     else
         printf("No thermal_zone_index_map in this object (ok if temps are updated elsewhere).\n");
-    build_thermal_zone_mapping(tz_map_fd, &mapped_zones);
+    build_thermal_zone_mapping(tz_map_fd, -1, &mapped_zones);
 
     config_map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_config_map");
     if (config_map_fd >= 0) {
