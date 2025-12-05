@@ -89,7 +89,7 @@ sudo make test-scx
 
 ### FIFO Scheduler
 
-**⚠️ WARNING**: This replaces your system's scheduler. Test in a safe environment!
+**WARNING**: This replaces your system's scheduler. Test in a safe environment!
 
 ```bash
 sudo make run-fifo

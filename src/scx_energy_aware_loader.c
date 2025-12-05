@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /* Loader for the minimal Round-Robin sched_ext scheduler.
  * Attaches the BPF struct_ops program and wires it up with the pinned
  * rapl_stats map so stats can be printed directly from the kernel.

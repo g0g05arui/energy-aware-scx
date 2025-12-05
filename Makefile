@@ -51,10 +51,12 @@ SCX_FIFO_BIN = $(BUILD_DIR)/scx_fifo
 ENERGY_BPF_OBJ = $(BUILD_DIR)/scx_energy_aware.bpf.o
 ENERGY_LOADER = $(BUILD_DIR)/scx_energy_aware
 RAPL_CONSOLE = $(BUILD_DIR)/rapl_console_reader
+HWMON_READER = $(BUILD_DIR)/hwmon_console_reader
+
 
 .PHONY: all clean
 
-all: $(BUILD_DIR) $(BPF_OBJ) $(USER_BIN) $(SCX_READER) $(SCX_FIFO_BPF) $(SCX_FIFO_BIN) $(ENERGY_BPF_OBJ) $(ENERGY_LOADER) $(RAPL_CONSOLE)
+all: $(BUILD_DIR) $(BPF_OBJ) $(USER_BIN) $(SCX_READER) $(SCX_FIFO_BPF) $(SCX_FIFO_BIN) $(ENERGY_BPF_OBJ) $(ENERGY_LOADER) $(RAPL_CONSOLE) $(HWMON_READER)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -90,6 +92,10 @@ $(ENERGY_LOADER): src/scx_energy_aware_loader.c $(ENERGY_BPF_OBJ)
 $(RAPL_CONSOLE): src/rapl_console_reader.c
 	$(CC) $(CFLAGS) src/rapl_console_reader.c -o $(RAPL_CONSOLE)
 	@echo "RAPL console reader built: $(RAPL_CONSOLE)"
+
+$(HWMON_READER): src/hwmon_console_reader.c
+	$(CC) $(CFLAGS) src/hwmon_console_reader.c -o $(HWMON_READER)
+	@echo "HWMON console reader built: $(HWMON_READER)"
 
 run: all
 	@echo "Running RAPL stats updater..."
