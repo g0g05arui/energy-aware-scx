@@ -1,5 +1,6 @@
 /* "Cold-aware" Round-Robin sched_ext scheduler */
 
+#include "vmlinux.h"
 #include <scx/common.bpf.h>
 #include <bpf/bpf_helpers.h>
 #include "rapl_stats.h"
@@ -22,6 +23,13 @@ struct {
 	__type(value, __u32);
 } core_temp_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+} core_temp_count_map SEC(".maps");
+
 static __u64 last_printed_ts;
 static __u32 cold_rr_cursor;
 
@@ -39,10 +47,25 @@ static __always_inline __u32 read_temp(__u32 idx, bool *valid)
 	return 0;
 }
 
+static __always_inline __u32 read_temp_count(__u32 stats_core_count)
+{
+	__u32 key = 0;
+	__u32 *count = bpf_map_lookup_elem(&core_temp_count_map, &key);
+
+	if (count && *count && *count <= MAX_CORE_TEMPS)
+		return *count;
+
+	if (stats_core_count == 0 || stats_core_count > MAX_CORE_TEMPS)
+		return MAX_CORE_TEMPS;
+
+	return stats_core_count;
+}
+
 static __always_inline void log_stats_from_map(void)
 {
 	struct rapl_stats *stats;
 	__u32 key = 0;
+	__u32 temp_count;
 
 	stats = bpf_map_lookup_elem(&rapl_stats_map, &key);
 	if (!stats)
@@ -62,9 +85,11 @@ static __always_inline void log_stats_from_map(void)
 		   stats->core_count,
 		   stats->tdp);
 
+	temp_count = read_temp_count(stats->core_count);
+
 #pragma clang loop unroll(disable)
 	for (int i = 0; i < MAX_CORE_TEMPS; i++) {
-		if (i >= stats->core_count)
+		if (i >= temp_count)
 			break;
 		bool valid = false;
 		__u32 temp = read_temp(i, &valid);
@@ -81,20 +106,21 @@ static __always_inline s32 cold_select_cpu_impl(struct task_struct *p, s32 prev_
 	s32 fallback = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &idle_hint);
 	s32 best_cpu = -1;
 	__u32 best_temp = (__u32)-1;
+	__u32 temp_count;
 
 	stats = bpf_map_lookup_elem(&rapl_stats_map, &key);
 	if (!stats || !stats->core_count)
 		return fallback;
 
-	__u32 count = stats->core_count;
-	if (count > MAX_CORE_TEMPS)
-		count = MAX_CORE_TEMPS;
+	temp_count = read_temp_count(stats->core_count);
+	if (temp_count > MAX_CORE_TEMPS)
+		temp_count = MAX_CORE_TEMPS;
 
 #pragma clang loop unroll(disable)
 	for (int iter = 0; iter < MAX_CORE_TEMPS; iter++) {
-		if (iter >= count)
+		if (iter >= temp_count)
 			break;
-		__u32 idx = (cold_rr_cursor + iter) % count;
+		__u32 idx = (cold_rr_cursor + iter) % temp_count;
 		if (!bpf_cpumask_test_cpu(idx, p->cpus_ptr))
 			continue;
 
@@ -112,7 +138,7 @@ static __always_inline s32 cold_select_cpu_impl(struct task_struct *p, s32 prev_
 	if (best_cpu < 0)
 		return fallback;
 
-	cold_rr_cursor = (best_cpu + 1) % count;
+	cold_rr_cursor = (best_cpu + 1) % temp_count;
 
 	if (scx_bpf_test_and_clear_cpu_idle(best_cpu))
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, RR_SLICE_NS, 0);

@@ -10,8 +10,10 @@
 int main(int argc, char **argv) {
     const char *pin_path = "/sys/fs/bpf/rapl_stats";
     const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
+    const char *temp_count_pin_path = "/sys/fs/bpf/rapl_temp_count";
     int map_fd;
     int temps_fd;
+    int temp_count_fd;
     struct rapl_stats stats;
     __u32 key = 0;
     int err;
@@ -30,6 +32,12 @@ int main(int argc, char **argv) {
                 temps_pin_path, strerror(errno));
         close(map_fd);
         return 1;
+    }
+
+    temp_count_fd = bpf_obj_get(temp_count_pin_path);
+    if (temp_count_fd < 0) {
+        fprintf(stderr, "WARNING: failed to open temp count map at %s: %s\n",
+                temp_count_pin_path, strerror(errno));
     }
     
     err = bpf_map_lookup_elem(map_fd, &key, &stats);
@@ -52,15 +60,22 @@ int main(int argc, char **argv) {
     printf("Core Power:     %llu W\n", stats.core_power);
     printf("Core Energy:    %llu J\n", stats.core_energy);
     printf("Core Count:     %u\n", stats.core_count);
+    __u32 temp_count = stats.core_count;
+    if (temp_count_fd >= 0) {
+        __u32 cnt_key = 0;
+        __u32 count_val = stats.core_count;
+        if (bpf_map_lookup_elem(temp_count_fd, &cnt_key, &count_val) == 0)
+            temp_count = count_val;
+    }
     printf("Core Temps:     ");
-    for (unsigned int i = 0; i < stats.core_count; i++) {
+    for (unsigned int i = 0; i < temp_count; i++) {
         __u32 idx = i;
         __u32 temp = 0;
         if (bpf_map_lookup_elem(temps_fd, &idx, &temp) == 0)
             printf("%u", temp);
         else
             printf("?");
-        if (i + 1 != stats.core_count)
+        if (i + 1 != temp_count)
             printf(", ");
     }
     printf(" °C\n");
@@ -69,5 +84,7 @@ int main(int argc, char **argv) {
     
     close(map_fd);
     close(temps_fd);
+    if (temp_count_fd >= 0)
+        close(temp_count_fd);
     return 0;
 }

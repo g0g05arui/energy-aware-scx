@@ -71,11 +71,11 @@ $(HWMON_BPF_OBJ): $(SRC_DIR)/hwmon_stats_interval.bpf.c $(INCLUDE_DIR)/rapl_stat
 	$(CLANG) $(BPF_CFLAGS) -c $(SRC_DIR)/hwmon_stats_interval.bpf.c -o $(HWMON_BPF_OBJ)
 	@echo "HWMON BPF object built: $(HWMON_BPF_OBJ)"
 
-$(USER_BIN): $(SRC_DIR)/loader.c $(SRC_DIR)/thermal_zone_helpers.h $(INCLUDE_DIR)/rapl_stats.h $(BPF_OBJ)
+$(USER_BIN): $(SRC_DIR)/loader.c $(INCLUDE_DIR)/rapl_stats.h $(BPF_OBJ)
 	$(CC) $(CFLAGS) $(SRC_DIR)/loader.c -o $(USER_BIN) $(LDFLAGS)
 	@echo "Userspace program built: $(USER_BIN)"
 
-$(HWMON_LOADER): $(SRC_DIR)/hwmon_loader.c $(SRC_DIR)/thermal_zone_helpers.h $(HWMON_BPF_OBJ)
+$(HWMON_LOADER): $(SRC_DIR)/hwmon_loader.c $(HWMON_BPF_OBJ)
 	$(CC) $(CFLAGS) $(SRC_DIR)/hwmon_loader.c -o $(HWMON_LOADER) $(LDFLAGS)
 	@echo "HWMON stats loader built: $(HWMON_LOADER)"
 
