@@ -239,6 +239,8 @@ static void update_core_temp_map(int temps_map_fd,
 		if (val < 0)
 			val = 0;
 
+		/* hwmon temps are in millidegrees C, convert to whole degrees */
+		val /= 1000;
 		if (val > UINT_MAX)
 			val = UINT_MAX;
 
