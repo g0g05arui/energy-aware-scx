@@ -18,11 +18,6 @@ static volatile sig_atomic_t keep_running = 1;
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #define TEMP_UPDATE_INTERVAL_MS 500
 
-struct core_sensor {
-	__u32 core_idx;
-	char input_path[PATH_MAX];
-};
-
 static void sig_handler(int signo)
 {
 	(void)signo;
@@ -51,12 +46,39 @@ static bool parse_core_label(const char *label, __u32 *core_idx)
 	return false;
 }
 
+struct core_sensor {
+	__u32 core_idx;
+	char input_path[PATH_MAX];
+};
+
+static int load_hwmon_name(const char *hwmon_dir, char *buf, size_t buflen)
+{
+	char name_path[PATH_MAX];
+	FILE *fp;
+
+	if (snprintf(name_path, sizeof(name_path), "%s/name", hwmon_dir) >=
+	    (int)sizeof(name_path))
+		return -ENAMETOOLONG;
+
+	fp = fopen(name_path, "r");
+	if (!fp)
+		return -errno;
+	if (!fgets(buf, buflen, fp)) {
+		fclose(fp);
+		return -EIO;
+	}
+	fclose(fp);
+	trim_newline(buf);
+	return 0;
+}
+
 static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors)
 {
 	DIR *root;
 	struct dirent *hwde;
 	size_t count = 0;
 	bool seen[MAX_CORE_TEMPS] = {};
+	size_t next_core_idx = 0;
 	const char *hwmon_root = "/sys/class/hwmon";
 
 	root = opendir(hwmon_root);
@@ -84,6 +106,18 @@ static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors
 		sensor_dir = opendir(hwmon_dir);
 		if (!sensor_dir)
 			continue;
+
+		char hwmon_name[64] = {};
+		bool is_coretemp = false;
+		size_t base_idx = 0;
+		size_t dir_max_core = 0;
+		bool dir_has_core = false;
+
+		if (!load_hwmon_name(hwmon_dir, hwmon_name, sizeof(hwmon_name)) &&
+		    strcmp(hwmon_name, "coretemp") == 0) {
+			is_coretemp = true;
+			base_idx = next_core_idx;
+		}
 
 		while ((entry = readdir(sensor_dir)) != NULL) {
 			int temp_id;
@@ -115,9 +149,14 @@ static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors
 
 			if (!parse_core_label(label, &core_idx))
 				continue;
-			if (core_idx >= MAX_CORE_TEMPS)
+
+			__u32 idx = core_idx;
+			if (is_coretemp)
+				idx = base_idx + core_idx;
+
+			if (idx >= MAX_CORE_TEMPS)
 				continue;
-			if (seen[core_idx])
+			if (seen[idx])
 				continue;
 			if (count >= max_sensors) {
 				fprintf(stderr,
@@ -126,7 +165,7 @@ static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors
 				continue;
 			}
 
-			sensors[count].core_idx = core_idx;
+			sensors[count].core_idx = idx;
 			if (snprintf(sensors[count].input_path,
 				     sizeof(sensors[count].input_path),
 				     "%s/temp%d_input", hwmon_dir, temp_id) >=
@@ -136,13 +175,24 @@ static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors
 					hwde->d_name, temp_id);
 				continue;
 			}
-			seen[core_idx] = true;
+			seen[idx] = true;
+			if (is_coretemp) {
+				dir_has_core = true;
+				if (core_idx > dir_max_core)
+					dir_max_core = core_idx;
+			}
 			printf("Mapped %s temp%d (%s) -> core %u\n", hwde->d_name,
-			       temp_id, label, core_idx);
+			       temp_id, label, idx);
 			count++;
 		}
 
 		closedir(sensor_dir);
+
+		if (is_coretemp && dir_has_core) {
+			size_t pkg_cores = dir_max_core + 1;
+			if (base_idx + pkg_cores > next_core_idx)
+				next_core_idx = base_idx + pkg_cores;
+		}
 	}
 
 	closedir(root);
