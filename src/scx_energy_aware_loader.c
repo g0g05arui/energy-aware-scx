@@ -31,13 +31,16 @@ int main(int argc, char **argv)
 	const char *bpf_obj_path = argc > 1 ? argv[1] : "scx_energy_aware.bpf.o";
 	const char *stats_pin_path = "/sys/fs/bpf/rapl_stats";
 	const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
+	const char *temp_count_pin_path = "/sys/fs/bpf/rapl_temp_count";
 	struct bpf_object *obj = NULL;
 	struct bpf_link *link = NULL;
 	struct bpf_map *ops_map;
 	struct bpf_map *stats_map;
 	struct bpf_map *temps_map;
+	struct bpf_map *temp_count_map;
 	int stats_fd = -1;
 	int temps_fd = -1;
+	int temp_count_fd = -1;
 	int err = 0;
 
 	signal(SIGINT, sig_handler);
@@ -59,6 +62,15 @@ int main(int argc, char **argv)
 		fprintf(stderr, "ERROR: failed to open pinned map at %s: %s\n",
 			temps_pin_path, strerror(errno));
 		fprintf(stderr, "Make sure rapl_stats_updater is running.\n");
+		err = -errno;
+		goto cleanup;
+	}
+
+	temp_count_fd = bpf_obj_get(temp_count_pin_path);
+	if (temp_count_fd < 0) {
+		fprintf(stderr, "ERROR: failed to open pinned map at %s: %s\n",
+			temp_count_pin_path, strerror(errno));
+		fprintf(stderr, "Make sure hwmon_stats_updater is running.\n");
 		err = -errno;
 		goto cleanup;
 	}
@@ -86,6 +98,13 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
+	temp_count_map = bpf_object__find_map_by_name(obj, "core_temp_count_map");
+	if (!temp_count_map) {
+		fprintf(stderr, "ERROR: core_temp_count_map not found in object\n");
+		err = -ENOENT;
+		goto cleanup;
+	}
+
 	if (bpf_map__reuse_fd(stats_map, stats_fd)) {
 		fprintf(stderr, "ERROR: failed to link rapl_stats map: %s\n",
 			strerror(errno));
@@ -95,6 +114,13 @@ int main(int argc, char **argv)
 
 	if (bpf_map__reuse_fd(temps_map, temps_fd)) {
 		fprintf(stderr, "ERROR: failed to link core_temp_map: %s\n",
+			strerror(errno));
+		err = -errno;
+		goto cleanup;
+	}
+
+	if (bpf_map__reuse_fd(temp_count_map, temp_count_fd)) {
+		fprintf(stderr, "ERROR: failed to link core_temp_count_map: %s\n",
 			strerror(errno));
 		err = -errno;
 		goto cleanup;
@@ -125,6 +151,7 @@ int main(int argc, char **argv)
 	printf("Round-Robin scheduler loaded and attached successfully.\n");
 	printf("Pinned RAPL stats map: %s\n", stats_pin_path);
 	printf("Pinned RAPL temps map: %s\n", temps_pin_path);
+	printf("Pinned RAPL temp count map: %s\n", temp_count_pin_path);
 	printf("Stats are emitted from the kernel via bpf_printk.\n");
 	printf("Run 'sudo cat /sys/kernel/debug/tracing/trace_pipe' to monitor them.\n");
 	printf("Press Ctrl+C to stop.\n\n");
@@ -135,6 +162,8 @@ int main(int argc, char **argv)
 	printf("\nStopping scheduler...\n");
 
 cleanup:
+	if (temp_count_fd >= 0)
+		close(temp_count_fd);
 	if (temps_fd >= 0)
 		close(temps_fd);
 	if (stats_fd >= 0)

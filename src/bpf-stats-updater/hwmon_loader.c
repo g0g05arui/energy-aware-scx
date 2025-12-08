@@ -258,11 +258,14 @@ int main(int argc, char **argv)
 {
 	const char *bpf_obj_path = argc > 1 ? argv[1] : "hwmon_stats_interval.bpf.o";
 	const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
+	const char *temp_count_pin_path = "/sys/fs/bpf/rapl_temp_count";
 	struct bpf_object *obj = NULL;
 	int temps_map_fd;
+	int temp_count_map_fd;
 	int err = 0;
 	int mapped_cores = 0;
 	bool temps_pinned = false;
+	bool temp_count_pinned = false;
 	struct core_sensor sensors[MAX_CORE_TEMPS] = {};
 
 	signal(SIGINT, sig_handler);
@@ -296,14 +299,41 @@ int main(int argc, char **argv)
 	}
 	temps_pinned = true;
 
+	temp_count_map_fd = bpf_object__find_map_fd_by_name(obj, "core_temp_count_map");
+	if (temp_count_map_fd < 0) {
+		fprintf(stderr, "ERROR: core_temp_count_map not found in object\n");
+		err = -ENOENT;
+		goto cleanup;
+	}
+
+	err = bpf_obj_pin(temp_count_map_fd, temp_count_pin_path);
+	if (err && errno != EEXIST) {
+		fprintf(stderr, "ERROR: failed to pin core_temp_count_map at %s: %s\n",
+			temp_count_pin_path, strerror(errno));
+		goto cleanup;
+	}
+	temp_count_pinned = true;
+
 	mapped_cores = discover_core_sensors(sensors, ARRAY_SIZE(sensors));
 	if (mapped_cores < 0) {
 		err = mapped_cores;
 		goto cleanup;
 	}
 
+	{
+		__u32 key = 0;
+		__u32 count = mapped_cores;
+		if (count > MAX_CORE_TEMPS)
+			count = MAX_CORE_TEMPS;
+		if (bpf_map_update_elem(temp_count_map_fd, &key, &count, BPF_ANY))
+			fprintf(stderr,
+				"WARNING: failed to update core_temp_count_map: %s\n",
+				strerror(errno));
+	}
+
 	printf("HWMON stats updater running (%d mapped cores)\n", mapped_cores);
 	printf("Per-core temps pinned at: %s\n", temps_pin_path);
+	printf("Core temp count pinned at: %s\n", temp_count_pin_path);
 	printf("Polling hwmon sensors every %d ms. Press Ctrl+C to stop.\n\n",
 	       TEMP_UPDATE_INTERVAL_MS);
 
@@ -319,6 +349,8 @@ cleanup:
 		bpf_object__close(obj);
 	if (temps_pinned)
 		unlink(temps_pin_path);
+	if (temp_count_pinned)
+		unlink(temp_count_pin_path);
 
 	return err != 0;
 }
