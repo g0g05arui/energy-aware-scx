@@ -1,5 +1,3 @@
-/* "Cold-aware" Round-Robin sched_ext scheduler */
-
 #include "vmlinux.h"
 #include <scx/common.bpf.h>
 #include <bpf/bpf_helpers.h>
