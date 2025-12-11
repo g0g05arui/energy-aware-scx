@@ -26,3 +26,4 @@ core
 vgcore.*
 
 src/include/vmlinux.h
+src/include/temp_thresholds.h
