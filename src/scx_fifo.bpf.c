@@ -1,5 +1,5 @@
 /* Simple FIFO sched_ext scheduler */
-
+#include "vmlinux.h"
 #include <scx/common.bpf.h>
 
 char _license[] SEC("license") = "GPL";
