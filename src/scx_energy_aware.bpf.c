@@ -109,15 +109,17 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 	__u32 cpu = 0;
 
 #pragma clang loop unroll(disable)
-	for (; cpu < nr_cpus; cpu++) {
+	while (cpu < nr_cpus) {
 		s32 dsq_depth;
 		__u32 depth;
 		enum core_status state;
 
 		if (cpu >= ENERGY_AWARE_MAX_CPUS)
 			break;
-		if (!task_allows_cpu(p, cpu, nr_cpus))
+		if (!task_allows_cpu(p, cpu, nr_cpus)) {
+			cpu++;
 			continue;
+		}
 
 		state = read_core_state(cpu);
 
@@ -129,11 +131,14 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 				best_depth = depth;
 				best_cpu = cpu;
 			}
+			cpu++;
 			continue;
 		}
 
 		if (state != CORE_HOT)
 			*found_warm = true;
+
+		cpu++;
 	}
 
 	return best_cpu;
@@ -145,11 +150,13 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 		return;
 
 #pragma clang loop unroll(disable)
-	for (__u32 cpu = 0; cpu < nr_cpus && cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
+	for (__u32 cpu = 0; cpu < nr_cpus && cpu < ENERGY_AWARE_MAX_CPUS;) {
 		enum core_status state;
 
-		if (!task_allows_cpu(p, cpu, nr_cpus))
+		if (!task_allows_cpu(p, cpu, nr_cpus)) {
+			cpu++;
 			continue;
+		}
 
 		state = read_core_state(cpu);
 
@@ -157,6 +164,8 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 			scx_bpf_cpu_can_run(p, cpu, false);
 		else
 			scx_bpf_cpu_can_run(p, cpu, true);
+
+		cpu++;
 	}
 }
 
@@ -215,12 +224,14 @@ static __always_inline void log_stats_from_map(void)
 	temp_count = read_temp_count(stats->core_count);
 
 #pragma clang loop unroll(disable)
-	for (__u32 i = 0; i < temp_count; i++) {
+	for (__u32 i = 0; i < temp_count;) {
 		if (i >= MAX_CORE_TEMPS)
 			break;
 		bool valid = false;
 		__u32 temp = read_temp(i, &valid);
 		bpf_printk("RAPL core[%d]=%uC%s", i, temp, valid ? "" : "?");
+
+		i++;
 	}
 }
 
