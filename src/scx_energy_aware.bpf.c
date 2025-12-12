@@ -106,13 +106,15 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 
 	*found_warm = false;
 
+	__u32 cpu = 0;
+
 #pragma clang loop unroll(disable)
-	for (int cpu = 0; cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
+	for (; cpu < nr_cpus; cpu++) {
 		s32 dsq_depth;
 		__u32 depth;
 		enum core_status state;
 
-		if ((__u32)cpu >= nr_cpus)
+		if (cpu >= ENERGY_AWARE_MAX_CPUS)
 			break;
 		if (!task_allows_cpu(p, cpu, nr_cpus))
 			continue;
@@ -143,11 +145,9 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 		return;
 
 #pragma clang loop unroll(disable)
-	for (int cpu = 0; cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
+	for (__u32 cpu = 0; cpu < nr_cpus && cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
 		enum core_status state;
 
-		if ((__u32)cpu >= nr_cpus)
-			break;
 		if (!task_allows_cpu(p, cpu, nr_cpus))
 			continue;
 
