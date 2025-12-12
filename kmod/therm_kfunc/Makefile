@@ -14,6 +14,12 @@ export LLVM_OBJCOPY
 obj-m := therm_kfunc.o
 EXTRA_CFLAGS += -g
 
+ifneq ("$(wildcard $(KDIR)/vmlinux)","")
+  BTF_BASE ?= $(KDIR)/vmlinux
+else ifneq ("$(wildcard /sys/kernel/btf/vmlinux)","")
+  BTF_BASE ?= /sys/kernel/btf/vmlinux
+endif
+
 .PHONY: all btf clean
 
 all: therm_kfunc.ko btf
@@ -23,8 +29,13 @@ therm_kfunc.ko:
 
 btf: therm_kfunc.ko
 	@if command -v $(PAHOLE) >/dev/null 2>&1; then \
-		echo "Embedding BTF into therm_kfunc.ko"; \
-		LLVM_OBJCOPY="$(LLVM_OBJCOPY)" $(PAHOLE) -J $(PWD)/therm_kfunc.ko; \
+		if [ -n "$(BTF_BASE)" ]; then \
+			echo "Embedding BTF into therm_kfunc.ko (base: $(BTF_BASE))"; \
+			LLVM_OBJCOPY="$(LLVM_OBJCOPY)" $(PAHOLE) --btf_base $(BTF_BASE) -J $(PWD)/therm_kfunc.ko; \
+		else \
+			echo "Embedding BTF into therm_kfunc.ko"; \
+			LLVM_OBJCOPY="$(LLVM_OBJCOPY)" $(PAHOLE) -J $(PWD)/therm_kfunc.ko; \
+		fi; \
 	else \
 		echo "WARNING: pahole not found; module BTF will be missing"; \
 	fi
