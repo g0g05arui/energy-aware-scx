@@ -16,10 +16,6 @@ char _license[] SEC("license") = "GPL";
 #endif
 #endif 
 
-#ifndef SCX_CPU_SELECT_FALLBACK
-#define SCX_CPU_SELECT_FALLBACK (-1)
-#endif
-
 extern bool scx_bpf_cpu_can_run(struct task_struct *p, s32 cpu, bool allowed) __ksym __weak;
 
 struct {
@@ -198,6 +194,14 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 	bpf_loop(ENERGY_AWARE_MAX_CPUS, steer_cb, &ctx, 0);
 }
 
+static __always_inline s32 select_cpu_default(struct task_struct *p, s32 prev_cpu,
+					      u64 wake_flags)
+{
+	bool is_idle = false;
+
+	return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+}
+
 static  __u32 read_temp(__u32 idx, bool *valid)
 {
 	__u32 *temp = bpf_map_lookup_elem(&core_temp_map, &idx);
@@ -271,7 +275,7 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	(void)wake_flags;
 
 	if (!nr_cpus)
-		return SCX_CPU_SELECT_FALLBACK;
+		return select_cpu_default(p, prev_cpu, wake_flags);
 
 	/* 1) Prefer to keep the task on its previous CPU if it isn't hot. */
 	cpu = reuse_prev_cpu(p, prev_cpu, nr_cpus);
@@ -290,14 +294,14 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	 */
 	if (found_warm) {
 		steer_away_from_hot(p, nr_cpus);
-		return SCX_CPU_SELECT_FALLBACK;
+		return select_cpu_default(p, prev_cpu, wake_flags);
 	}
 
 	/*
 	 * 4) Every allowed CPU is hot (or none were eligible). Fall back
 	 *    without exclusions so the kernel can pick the least bad CPU.
 	 */
-	return SCX_CPU_SELECT_FALLBACK;
+	return select_cpu_default(p, prev_cpu, wake_flags);
 }
 
 void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
