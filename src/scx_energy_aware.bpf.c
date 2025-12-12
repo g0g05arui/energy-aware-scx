@@ -215,8 +215,8 @@ static __always_inline void log_stats_from_map(void)
 	temp_count = read_temp_count(stats->core_count);
 
 #pragma clang loop unroll(disable)
-	for (int i = 0; i < MAX_CORE_TEMPS; i++) {
-		if (i >= temp_count)
+	for (__u32 i = 0; i < temp_count; i++) {
+		if (i >= MAX_CORE_TEMPS)
 			break;
 		bool valid = false;
 		__u32 temp = read_temp(i, &valid);
