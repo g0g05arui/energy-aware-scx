@@ -9,8 +9,12 @@ char _license[] SEC("license") = "GPL";
 #define RR_SLICE_NS SCX_SLICE_DFL
 
 #ifndef ENERGY_AWARE_MAX_CPUS
+#ifdef MAX_CPUS
 #define ENERGY_AWARE_MAX_CPUS MAX_CPUS
+#else
+#define ENERGY_AWARE_MAX_CPUS 64
 #endif
+#endif 
 
 #ifndef SCX_CPU_SELECT_FALLBACK
 #define SCX_CPU_SELECT_FALLBACK (-1)
