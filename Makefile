@@ -36,6 +36,22 @@ HOT ?= 60
 WARM ?= 55
 THROTTLE ?= 85
 
+TJMAX_KSYM ?= auto
+
+ifeq ($(TJMAX_KSYM),auto)
+  HAVE_THERM_KSYM := $(shell scripts/check_therm_ksym.sh >/dev/null 2>&1 && echo 1 || echo 0)
+else ifeq ($(TJMAX_KSYM),1)
+  HAVE_THERM_KSYM := 1
+else
+  HAVE_THERM_KSYM := 0
+endif
+
+ifeq ($(HAVE_THERM_KSYM),1)
+  $(info Delta TjMax sampling enabled (therm_read_ia32_therm_status found))
+else
+  $(info Delta TjMax sampling disabled (therm_read_ia32_therm_status unavailable))
+endif
+
 TEMP_HEADER = $(INCLUDE_DIR)/temp_thresholds.h
 STATS_HEADERS = $(INCLUDE_DIR)/rapl_stats.h $(TEMP_HEADER)
 
@@ -44,6 +60,8 @@ BPF_CFLAGS = -O2 -g -target bpf -D__TARGET_ARCH_$(BPF_TARGET_ARCH) \
 	-I$(SYS_INCLUDE_DIR) \
 	-I/usr/src/linux-headers-$(KERNEL_VERSION)/tools/lib/bpf \
 	-I/usr/src/linux-headers-$(KERNEL_VERSION)/tools/bpf/resolve_btfids/libbpf/include
+
+BPF_CFLAGS += -DENABLE_TJMAX_KSYM=$(HAVE_THERM_KSYM)
 
 BPF_SCX_CFLAGS = $(BPF_CFLAGS) -I$(SCX_INCLUDE)
 

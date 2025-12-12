@@ -11,7 +11,13 @@ char LICENSE[] SEC("license") = "GPL";
 #define TJMAX_DELTA_MASK 0x7f
 #define TJMAX_DELTA_SHIFT 16
 
+#ifndef ENABLE_TJMAX_KSYM
+#define ENABLE_TJMAX_KSYM 0
+#endif
+
+#if ENABLE_TJMAX_KSYM
 extern __u64 therm_read_ia32_therm_status(void) __ksym;
+#endif
 
 struct timer_wrapper {
 	struct bpf_timer timer;
@@ -78,6 +84,9 @@ static inline __u32 get_core_count(void)
 
 static inline __u32 get_tjmax_cpu_count(void)
 {
+#if !ENABLE_TJMAX_KSYM
+	return 0;
+#else
 	__u32 config_key = 0;
 	struct rapl_config *cfg;
 
@@ -85,6 +94,7 @@ static inline __u32 get_tjmax_cpu_count(void)
 	if (!cfg || cfg->tjmax_cpu_count == 0 || cfg->tjmax_cpu_count > MAX_CPUS)
 		return MAX_CPUS;
 	return cfg->tjmax_cpu_count;
+#endif
 }
 
 static int stats_timer_callback(void *map, __u32 *key, struct bpf_timer *timer)
@@ -115,6 +125,7 @@ static int stats_timer_callback(void *map, __u32 *key, struct bpf_timer *timer)
 	return 0;
 }
 
+#if ENABLE_TJMAX_KSYM
 static int tjmax_timer_callback(void *map, __u32 *key, struct bpf_timer *timer)
 {
 	struct tjmax_delta_sample sample = {};
@@ -129,6 +140,15 @@ static int tjmax_timer_callback(void *map, __u32 *key, struct bpf_timer *timer)
 	bpf_timer_start(timer, TJMAX_INTERVAL_NS, BPF_F_TIMER_CPU_PIN);
 	return 0;
 }
+#else
+static int tjmax_timer_callback(void *map, __u32 *key, struct bpf_timer *timer)
+{
+	(void)map;
+	(void)key;
+	(void)timer;
+	return 0;
+}
+#endif
 
 static int init_stats_timer(void)
 {
@@ -150,6 +170,7 @@ static int init_stats_timer(void)
 	return bpf_timer_start(&tw->timer, STATS_INTERVAL_NS, 0);
 }
 
+#if ENABLE_TJMAX_KSYM
 static int init_tjmax_timer(__u32 cpu)
 {
 	struct timer_wrapper *tw;
@@ -169,6 +190,13 @@ static int init_tjmax_timer(__u32 cpu)
 
 	return bpf_timer_start(&tw->timer, TJMAX_INTERVAL_NS, BPF_F_TIMER_CPU_PIN);
 }
+#else
+static int init_tjmax_timer(__u32 cpu)
+{
+	(void)cpu;
+	return 0;
+}
+#endif
 
 SEC("syscall")
 int start_timer(void *ctx)
