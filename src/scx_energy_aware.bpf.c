@@ -8,6 +8,10 @@ char _license[] SEC("license") = "GPL";
 
 #define RR_SLICE_NS SCX_SLICE_DFL
 
+#ifndef ENERGY_AWARE_MAX_CPUS
+#define ENERGY_AWARE_MAX_CPUS MAX_CPUS
+#endif
+
 #ifndef SCX_CPU_SELECT_FALLBACK
 #define SCX_CPU_SELECT_FALLBACK (-1)
 #endif
@@ -48,8 +52,8 @@ static __always_inline __u32 clamp_nr_cpus(void)
 {
 	__u32 nr = scx_bpf_nr_cpu_ids();
 
-	if (nr > NR_CPUS)
-		return NR_CPUS;
+	if (nr > ENERGY_AWARE_MAX_CPUS)
+		return ENERGY_AWARE_MAX_CPUS;
 	return nr;
 }
 
@@ -99,7 +103,7 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 	*found_warm = false;
 
 #pragma clang loop unroll(disable)
-	for (int cpu = 0; cpu < NR_CPUS; cpu++) {
+	for (int cpu = 0; cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
 		s32 dsq_depth;
 		__u32 depth;
 		enum core_status state;
@@ -135,7 +139,7 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 		return;
 
 #pragma clang loop unroll(disable)
-	for (int cpu = 0; cpu < NR_CPUS; cpu++) {
+	for (int cpu = 0; cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
 		enum core_status state;
 
 		if ((__u32)cpu >= nr_cpus)
