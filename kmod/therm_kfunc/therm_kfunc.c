@@ -28,9 +28,9 @@ static __bpf_kfunc u64 therm_read_ia32_therm_status(void)
 #endif
 }
 
-BTF_SET_START(therm_kfunc_ids)
-BTF_ID(func, therm_read_ia32_therm_status)
-BTF_SET_END(therm_kfunc_ids)
+BTF_KFUNCS_START(therm_kfunc_ids)
+BTF_ID_FLAGS(func, therm_read_ia32_therm_status)
+BTF_KFUNCS_END(therm_kfunc_ids)
 
 static const struct btf_kfunc_id_set therm_kfunc_set = {
 	.owner = THIS_MODULE,
@@ -39,12 +39,11 @@ static const struct btf_kfunc_id_set therm_kfunc_set = {
 
 static int __init therm_kfunc_init(void)
 {
-	return register_btf_kfunc_id_set(&therm_kfunc_set);
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &therm_kfunc_set);
 }
 
 static void __exit therm_kfunc_exit(void)
 {
-	unregister_btf_kfunc_id_set(&therm_kfunc_set);
 }
 
 module_init(therm_kfunc_init);
