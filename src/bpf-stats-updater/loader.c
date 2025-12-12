@@ -17,6 +17,14 @@
 #define UPDATE_INTERVAL_MS 100
 #define MAX_RAPL_DOMAINS   32
 
+#ifndef ENABLE_TJMAX_KSYM
+#define ENABLE_TJMAX_KSYM 0
+#endif
+
+#ifndef BPF_F_TEST_RUN_ON_CPU
+#define BPF_F_TEST_RUN_ON_CPU (1U << 0)
+#endif
+
 static volatile sig_atomic_t keep_running = 1;
 
 struct rapl_domain {
@@ -67,8 +75,12 @@ static void sleep_interval(void)
 static void usage(const char *prog)
 {
 	fprintf(stderr, "Usage: %s [BPF_OBJECT] [--dump-tjmax]\n", prog);
+	if (!ENABLE_TJMAX_KSYM)
+		fprintf(stderr,
+			"       (Delta TjMax sampling disabled at build time)\n");
 }
 
+#if ENABLE_TJMAX_KSYM
 static void dump_tjmax_samples(int map_fd, unsigned int cpu_cnt)
 {
 	unsigned int limit = cpu_cnt;
@@ -91,7 +103,9 @@ static void dump_tjmax_samples(int map_fd, unsigned int cpu_cnt)
 	}
 	printf("\n");
 }
+#endif
 
+#if ENABLE_TJMAX_KSYM
 static int start_bpf_timers(struct bpf_object *obj, unsigned int cpu_cnt)
 {
 	struct bpf_program *prog;
@@ -111,6 +125,7 @@ static int start_bpf_timers(struct bpf_object *obj, unsigned int cpu_cnt)
 	for (unsigned int cpu = 0; cpu < cpu_cnt; cpu++) {
 		LIBBPF_OPTS(bpf_test_run_opts, opts,
 			    .repeat = 1,
+			    .flags = BPF_F_TEST_RUN_ON_CPU,
 			    .cpu = cpu);
 		int err = bpf_prog_test_run_opts(prog_fd, &opts);
 
@@ -127,6 +142,7 @@ static int start_bpf_timers(struct bpf_object *obj, unsigned int cpu_cnt)
 
 	return 0;
 }
+#endif
 
 static int read_u64_file(const char *path, unsigned long long *val)
 {
@@ -370,27 +386,38 @@ int main(int argc, char **argv)
 {
 	const char *bpf_obj_path = "repl_stats_interval.bpf.o";
 	const char *stats_pin_path = "/sys/fs/bpf/rapl_stats";
+#if ENABLE_TJMAX_KSYM
 	const char *tjmax_pin_path = "/sys/fs/bpf/tjmax_delta";
+#endif
 	struct bpf_object *obj = NULL;
 	int stats_map_fd = -1;
 	int config_map_fd = -1;
 	int temps_fd = -1;
 	int temp_count_fd = -1;
-	int tjmax_map_fd = -1;
 	int err = 0;
 	struct rapl_sources sources;
 	unsigned int configured_core_count = 0;
+#if ENABLE_TJMAX_KSYM
+	int tjmax_map_fd = -1;
 	unsigned int tjmax_cpu_count = 0;
 	bool stats_map_pinned = false;
 	bool tjmax_map_pinned = false;
 	bool dump_tjmax = false;
+#else
+	bool stats_map_pinned = false;
+#endif
 
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--dump-tjmax") == 0) {
+#if ENABLE_TJMAX_KSYM
 			dump_tjmax = true;
+#else
+			fprintf(stderr,
+				"WARNING: --dump-tjmax ignored; Delta TjMax sampling disabled at build time.\n");
+#endif
 		} else if (strcmp(argv[i], "--help") == 0 ||
 			   strcmp(argv[i], "-h") == 0) {
 			usage(argv[0]);
@@ -435,12 +462,18 @@ int main(int argc, char **argv)
 			possible_cpus = MAX_CPUS;
 
 		cfg.core_count = cpu_cnt;
+#if ENABLE_TJMAX_KSYM
 		cfg.tjmax_cpu_count = possible_cpus;
+#else
+		cfg.tjmax_cpu_count = 0;
+#endif
 		if (bpf_map_update_elem(config_map_fd, &cfg_key, &cfg, BPF_ANY))
 			fprintf(stderr, "WARNING: failed to set rapl_config_map: %s\n",
 				strerror(errno));
 		configured_core_count = cfg.core_count;
+#if ENABLE_TJMAX_KSYM
 		tjmax_cpu_count = cfg.tjmax_cpu_count;
+#endif
 	} else {
 		fprintf(stderr,
 			"WARNING: rapl_config_map not found; using default core count 0\n");
@@ -456,6 +489,7 @@ int main(int argc, char **argv)
 		configured_core_count = cpu_cnt;
 	}
 
+#if ENABLE_TJMAX_KSYM
 	if (tjmax_cpu_count == 0) {
 		int possible_cpus = libbpf_num_possible_cpus();
 
@@ -465,6 +499,7 @@ int main(int argc, char **argv)
 			possible_cpus = MAX_CPUS;
 		tjmax_cpu_count = possible_cpus;
 	}
+#endif
 
 	stats_map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_stats_map");
 	if (stats_map_fd < 0) {
@@ -480,6 +515,7 @@ int main(int argc, char **argv)
 	}
 	stats_map_pinned = true;
 
+#if ENABLE_TJMAX_KSYM
 	tjmax_map_fd = bpf_object__find_map_fd_by_name(obj, "tjmax_delta_map");
 	if (tjmax_map_fd < 0) {
 		fprintf(stderr, "ERROR: failed to find tjmax_delta_map\n");
@@ -494,11 +530,6 @@ int main(int argc, char **argv)
 	}
 	tjmax_map_pinned = true;
 
-	if (discover_rapl_sources(&sources)) {
-		err = 1;
-		goto cleanup;
-	}
-
 	if (tjmax_cpu_count > 0) {
 		int timer_err = start_bpf_timers(obj, tjmax_cpu_count);
 
@@ -508,6 +539,12 @@ int main(int argc, char **argv)
 		else
 			printf("Per-core Delta TjMax sampling active on %u CPUs\n",
 			       tjmax_cpu_count);
+	}
+#endif
+
+	if (discover_rapl_sources(&sources)) {
+		err = 1;
+		goto cleanup;
 	}
 
 	temps_fd = bpf_obj_get("/sys/fs/bpf/rapl_temps");
@@ -523,13 +560,17 @@ int main(int argc, char **argv)
 	printf("Using %zu package RAPL domains and %zu core domains\n",
 	       sources.package_cnt, sources.core_cnt);
 	printf("Stats map pinned at: %s\n", stats_pin_path);
+#if ENABLE_TJMAX_KSYM
 	if (tjmax_map_pinned)
 		printf("Delta TjMax map pinned at: %s\n", tjmax_pin_path);
+#endif
 	printf("Polling RAPL counters every %d ms. Press Ctrl+C to stop.\n\n",
 	       UPDATE_INTERVAL_MS);
 
 	unsigned long long last_sample_ns = 0;
+#if ENABLE_TJMAX_KSYM
 	unsigned long long last_tjmax_dump = 0;
+#endif
 	__u32 stats_key = 0;
 
 	while (keep_running) {
@@ -566,6 +607,7 @@ int main(int argc, char **argv)
 			fprintf(stderr, "WARNING: failed to update rapl_stats_map: %s\n",
 				strerror(errno));
 
+#if ENABLE_TJMAX_KSYM
 		if (dump_tjmax && tjmax_map_fd >= 0 && tjmax_cpu_count > 0) {
 			if (!last_tjmax_dump ||
 			    now_ns - last_tjmax_dump >= 1000000000ull) {
@@ -573,6 +615,7 @@ int main(int argc, char **argv)
 				last_tjmax_dump = now_ns;
 			}
 		}
+#endif
 
 		sleep_interval();
 	}
@@ -582,8 +625,10 @@ int main(int argc, char **argv)
 cleanup:
 	if (stats_map_pinned)
 		unlink(stats_pin_path);
+#if ENABLE_TJMAX_KSYM
 	if (tjmax_map_pinned)
 		unlink(tjmax_pin_path);
+#endif
 	if (temp_count_fd >= 0)
 		close(temp_count_fd);
 	if (temps_fd >= 0)
