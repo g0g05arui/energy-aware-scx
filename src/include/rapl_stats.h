@@ -23,6 +23,7 @@
 #define power_t unsigned long long
 #define time_t_ns unsigned long long
 #define MAX_CORE_TEMPS 64
+#define MAX_CPUS 256
 
 struct rapl_stats{
     power_t package_power;      
@@ -42,6 +43,12 @@ struct rapl_stats{
 
 struct rapl_config{
     unsigned int core_count;
+    unsigned int tjmax_cpu_count;
+};
+
+struct tjmax_delta_sample {
+    unsigned int delta;
+    time_t_ns ts_ns;
 };
 
 #endif

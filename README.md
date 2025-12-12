@@ -5,6 +5,7 @@ A custom Linux scheduler using sched_ext (BPF) with RAPL (Running Average Power 
 ## Features
 
 - **RAPL Stats Monitor**: BPF-based energy and temperature monitoring with kernel timer (100ms intervals)
+- **Delta TjMax Sampling**: Per-core Intel DTS delta readings collected via BPF timers and a small kfunc module
 - **FIFO Scheduler**: Simple First-In-First-Out scheduler implementation using sched_ext
 - **BPF Map Integration**: Pinned BPF maps for inter-process communication of energy stats
 - **Round-Robin Scheduler (demo)**: Minimal sched_ext scheduler that time-slices tasks while steering new work toward the coldest CPUs using the synthetic RAPL stats
@@ -52,6 +53,17 @@ bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/include/vmlinux.h
 
 This creates a header with all kernel data structures needed for BPF programs.
 
+### 3. Build the Delta TjMax kfunc
+
+A tiny kernel module exposes a BPF kfunc that executes `rdmsrl(0x19c)` so timers can read the IA32_THERM_STATUS MSR on the current CPU. Build and load it before starting the stats updater (no reboot needed):
+
+```bash
+make -C kmod/therm_kfunc
+sudo insmod kmod/therm_kfunc/therm_kfunc.ko
+```
+
+Unload with `sudo rmmod therm_kfunc` when you are done sampling.
+
 ## Building
 
 ```bash
@@ -79,6 +91,12 @@ sudo make run
 ```
 
 The stats are written to a pinned BPF map at `/sys/fs/bpf/rapl_stats`.
+
+Per-core Delta-to-TjMax samples are stored in `/sys/fs/bpf/tjmax_delta`. Pass `--dump-tjmax` to `rapl_stats_updater` if you want the loader to periodically print a few samples for debugging, or inspect the map directly:
+
+```bash
+sudo bpftool map dump pinned /sys/fs/bpf/tjmax_delta
+```
 
 Read current energy stats:
 
@@ -120,12 +138,14 @@ Press Ctrl+C in the scheduler terminal to stop and detach.
 - `repl_stats_interval.bpf.c` - BPF program with kernel timer for stats generation
 - `loader.c` - Userspace loader that pins the BPF map
 - `scx_reader.c` - Example reader for accessing pinned stats
+- `kmod/therm_kfunc/therm_kfunc.c` - Kernel module that exposes a kfunc to read IA32_THERM_STATUS for the timer callbacks
 
 Stats collected:
 - Package/Core power (watts)
 - Package/Core energy (joules)
 - Package/Core temperature (°C)
 - TDP (Thermal Design Power)
+- Per-core Delta-to-TjMax samples (`/sys/fs/bpf/tjmax_delta`)
 
 ### FIFO Scheduler (src/)
 
