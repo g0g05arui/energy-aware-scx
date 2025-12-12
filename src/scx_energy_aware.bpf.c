@@ -73,7 +73,7 @@ static  enum core_status read_core_state(__u32 cpu)
 	return CORE_WARM;
 }
 
-static bool task_allows_cpu(struct task_struct *p, s32 cpu, __u32 nr_cpus)
+static __always_inline bool task_allows_cpu(struct task_struct *p, s32 cpu, __u32 nr_cpus)
 {
 	if (cpu < 0)
 		return false;
@@ -83,7 +83,7 @@ static bool task_allows_cpu(struct task_struct *p, s32 cpu, __u32 nr_cpus)
 	return bpf_cpumask_test_cpu(cpu, p->cpus_ptr);
 }
 
-static  s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, __u32 nr_cpus)
+static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, __u32 nr_cpus)
 {
 	enum core_status state;
 
@@ -97,68 +97,105 @@ static  s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, __u32 nr_cpus)
 	return -1;
 }
 
-static  s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
-					 bool *found_warm)
+struct pick_ctx {
+	struct task_struct *p;
+	__u32 nr_cpus;
+	bool found_warm;
+	s32 best_cpu;
+	__u32 best_depth;
+};
+
+static long pick_cold_cb(u64 idx, void *data)
 {
-	s32 best_cpu = -1;
-	__u32 best_depth = (__u32)-1;
+	struct pick_ctx *ctx = data;
+	s32 cpu = (s32)idx;
+	s32 dsq_depth;
+	__u32 depth;
+	enum core_status state;
 
-	*found_warm = false;
+	if ((__u32)cpu >= ctx->nr_cpus)
+		return 1;
 
-#pragma clang loop unroll(disable)
-	for (__u32 cpu = 0; cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
-		if (cpu >= nr_cpus)
-			break;
-		s32 dsq_depth;
-		__u32 depth;
-		enum core_status state;
+	if (!task_allows_cpu(ctx->p, cpu, ctx->nr_cpus))
+		return 0;
 
-		if (!task_allows_cpu(p, cpu, nr_cpus)) {
-			continue;
+	state = read_core_state(cpu);
+
+	if (state == CORE_COLD) {
+		dsq_depth = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+		depth = dsq_depth < 0 ? (__u32)-1 : (__u32)dsq_depth;
+
+		if (depth < ctx->best_depth) {
+			ctx->best_depth = depth;
+			ctx->best_cpu = cpu;
 		}
-
-		state = read_core_state(cpu);
-
-		if (state == CORE_COLD) {
-			dsq_depth = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
-			depth = dsq_depth < 0 ? (__u32)-1 : (__u32)dsq_depth;
-
-			if (depth < best_depth) {
-				best_depth = depth;
-				best_cpu = cpu;
-			}
-			continue;
-		}
-
-		if (state != CORE_HOT)
-			*found_warm = true;
+		return 0;
 	}
 
-	return best_cpu;
+	if (state != CORE_HOT)
+		ctx->found_warm = true;
+
+	return 0;
 }
 
-static  void steer_away_from_hot(struct task_struct *p, __u32 nr_cpus)
+static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
+					 bool *found_warm)
 {
+	struct pick_ctx ctx = {
+		.p = p,
+		.nr_cpus = nr_cpus,
+		.found_warm = false,
+		.best_cpu = -1,
+		.best_depth = (__u32)-1,
+	};
+	long ret;
+
+	ret = bpf_loop(ENERGY_AWARE_MAX_CPUS, pick_cold_cb, &ctx, 0);
+	if (ret < 0)
+		return -1;
+
+	*found_warm = ctx.found_warm;
+	return ctx.best_cpu;
+}
+
+struct steer_ctx {
+	struct task_struct *p;
+	__u32 nr_cpus;
+};
+
+static long steer_cb(u64 idx, void *data)
+{
+	struct steer_ctx *ctx = data;
+	s32 cpu = (s32)idx;
+	enum core_status state;
+
+	if ((__u32)cpu >= ctx->nr_cpus)
+		return 1;
+
+	if (!task_allows_cpu(ctx->p, cpu, ctx->nr_cpus))
+		return 0;
+
+	state = read_core_state(cpu);
+
+	if (state == CORE_HOT)
+		scx_bpf_cpu_can_run(ctx->p, cpu, false);
+	else
+		scx_bpf_cpu_can_run(ctx->p, cpu, true);
+
+	return 0;
+}
+
+static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_cpus)
+{
+	struct steer_ctx ctx = {
+		.p = p,
+		.nr_cpus = nr_cpus,
+	};
+
 	if (!bpf_ksym_exists(scx_bpf_cpu_can_run))
 		return;
 
-#pragma clang loop unroll(disable)
-	for (__u32 cpu = 0; cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
-		if (cpu >= nr_cpus)
-			break;
-		enum core_status state;
-
-		if (!task_allows_cpu(p, cpu, nr_cpus)) {
-			continue;
-		}
-
-		state = read_core_state(cpu);
-
-		if (state == CORE_HOT)
-			scx_bpf_cpu_can_run(p, cpu, false);
-		else
-			scx_bpf_cpu_can_run(p, cpu, true);
-	}
+	bpf_loop(ENERGY_AWARE_MAX_CPUS, steer_cb, &ctx, 0);
 }
 
 static  __u32 read_temp(__u32 idx, bool *valid)
