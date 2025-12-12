@@ -12,7 +12,7 @@ char _license[] SEC("license") = "GPL";
 #ifdef MAX_CPUS
 #define ENERGY_AWARE_MAX_CPUS MAX_CPUS
 #else
-#define ENERGY_AWARE_MAX_CPUS 64
+#define ENERGY_AWARE_MAX_CPUS 32
 #endif
 #endif 
 
@@ -52,7 +52,7 @@ struct {
 
 static __u64 last_printed_ts;
 
-static __always_inline __u32 clamp_nr_cpus(void)
+static __u32 clamp_nr_cpus(void)
 {
 	__u32 nr = scx_bpf_nr_cpu_ids();
 
@@ -61,7 +61,7 @@ static __always_inline __u32 clamp_nr_cpus(void)
 	return nr;
 }
 
-static __always_inline enum core_status read_core_state(__u32 cpu)
+static  enum core_status read_core_state(__u32 cpu)
 {
 	__u32 key = cpu;
 	enum core_status *state;
@@ -70,11 +70,10 @@ static __always_inline enum core_status read_core_state(__u32 cpu)
 	if (state)
 		return *state;
 
-	/* Default to WARM so we don't exclude CPUs unnecessarily. */
 	return CORE_WARM;
 }
 
-static __always_inline bool task_allows_cpu(struct task_struct *p, s32 cpu, __u32 nr_cpus)
+static bool task_allows_cpu(struct task_struct *p, s32 cpu, __u32 nr_cpus)
 {
 	if (cpu < 0)
 		return false;
@@ -84,7 +83,7 @@ static __always_inline bool task_allows_cpu(struct task_struct *p, s32 cpu, __u3
 	return bpf_cpumask_test_cpu(cpu, p->cpus_ptr);
 }
 
-static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, __u32 nr_cpus)
+static  s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, __u32 nr_cpus)
 {
 	enum core_status state;
 
@@ -98,7 +97,7 @@ static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, _
 	return -1;
 }
 
-static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
+static  s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 					 bool *found_warm)
 {
 	s32 best_cpu = -1;
@@ -106,18 +105,15 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 
 	*found_warm = false;
 
-	__u32 cpu = 0;
-
 #pragma clang loop unroll(disable)
-	while (cpu < nr_cpus) {
+	for (__u32 cpu = 0; cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
+		if (cpu >= nr_cpus)
+			break;
 		s32 dsq_depth;
 		__u32 depth;
 		enum core_status state;
 
-		if (cpu >= ENERGY_AWARE_MAX_CPUS)
-			break;
 		if (!task_allows_cpu(p, cpu, nr_cpus)) {
-			cpu++;
 			continue;
 		}
 
@@ -131,30 +127,28 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 				best_depth = depth;
 				best_cpu = cpu;
 			}
-			cpu++;
 			continue;
 		}
 
 		if (state != CORE_HOT)
 			*found_warm = true;
-
-		cpu++;
 	}
 
 	return best_cpu;
 }
 
-static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_cpus)
+static  void steer_away_from_hot(struct task_struct *p, __u32 nr_cpus)
 {
 	if (!bpf_ksym_exists(scx_bpf_cpu_can_run))
 		return;
 
 #pragma clang loop unroll(disable)
-	for (__u32 cpu = 0; cpu < nr_cpus && cpu < ENERGY_AWARE_MAX_CPUS;) {
+	for (__u32 cpu = 0; cpu < ENERGY_AWARE_MAX_CPUS; cpu++) {
+		if (cpu >= nr_cpus)
+			break;
 		enum core_status state;
 
 		if (!task_allows_cpu(p, cpu, nr_cpus)) {
-			cpu++;
 			continue;
 		}
 
@@ -164,12 +158,10 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 			scx_bpf_cpu_can_run(p, cpu, false);
 		else
 			scx_bpf_cpu_can_run(p, cpu, true);
-
-		cpu++;
 	}
 }
 
-static __always_inline __u32 read_temp(__u32 idx, bool *valid)
+static  __u32 read_temp(__u32 idx, bool *valid)
 {
 	__u32 *temp = bpf_map_lookup_elem(&core_temp_map, &idx);
 	if (temp) {
@@ -183,7 +175,7 @@ static __always_inline __u32 read_temp(__u32 idx, bool *valid)
 	return 0;
 }
 
-static __always_inline __u32 read_temp_count(__u32 stats_core_count)
+static  __u32 read_temp_count(__u32 stats_core_count)
 {
 	__u32 key = 0;
 	__u32 *count = bpf_map_lookup_elem(&core_temp_count_map, &key);
@@ -197,7 +189,7 @@ static __always_inline __u32 read_temp_count(__u32 stats_core_count)
 	return stats_core_count;
 }
 
-static __always_inline void log_stats_from_map(void)
+static void log_stats_from_map(void)
 {
 	struct rapl_stats *stats;
 	__u32 key = 0;
@@ -224,14 +216,12 @@ static __always_inline void log_stats_from_map(void)
 	temp_count = read_temp_count(stats->core_count);
 
 #pragma clang loop unroll(disable)
-	for (__u32 i = 0; i < temp_count;) {
-		if (i >= MAX_CORE_TEMPS)
+	for (__u32 i = 0; i < MAX_CORE_TEMPS; i++) {
+		if (i >= temp_count)
 			break;
 		bool valid = false;
 		__u32 temp = read_temp(i, &valid);
 		bpf_printk("RAPL core[%d]=%uC%s", i, temp, valid ? "" : "?");
-
-		i++;
 	}
 }
 
