@@ -46,7 +46,56 @@ struct {
 	__type(value, enum core_status);
 } core_state_map SEC(".maps");
 
+struct sched_log_state {
+	struct bpf_spin_lock lock;
+	__u64 last_ts;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct sched_log_state);
+} sched_log_state_map SEC(".maps");
+
 static __u64 last_printed_ts;
+#define SCHED_DECISION_LOG_INTERVAL_NS (100ULL * 1000 * 1000)
+
+static __always_inline bool sched_log_should_emit(__u64 now)
+{
+	struct sched_log_state *state;
+	__u32 key = 0;
+	bool should_log = false;
+
+	state = bpf_map_lookup_elem(&sched_log_state_map, &key);
+	if (!state)
+		return false;
+
+	bpf_spin_lock(&state->lock);
+	if (now - state->last_ts >= SCHED_DECISION_LOG_INTERVAL_NS) {
+		state->last_ts = now;
+		should_log = true;
+	}
+	bpf_spin_unlock(&state->lock);
+
+	return should_log;
+}
+
+static __always_inline void log_sched_decision(struct task_struct *p, s32 prev_cpu,
+					       s32 next_cpu)
+{
+	__u64 now;
+
+	if (next_cpu < 0)
+		return;
+
+	now = bpf_ktime_get_ns();
+	if (!sched_log_should_emit(now))
+		return;
+
+	bpf_printk("SCX sched pid=%d comm=%s prev=%d next=%d",
+		   p->pid, p->comm, prev_cpu, next_cpu);
+}
 
 static __u32 clamp_nr_cpus(void)
 {
@@ -274,18 +323,20 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 
 	(void)wake_flags;
 
-	if (!nr_cpus)
-		return select_cpu_default(p, prev_cpu, wake_flags);
+	if (!nr_cpus) {
+		cpu = select_cpu_default(p, prev_cpu, wake_flags);
+		goto log_return;
+	}
 
 	/* 1) Prefer to keep the task on its previous CPU if it isn't hot. */
 	cpu = reuse_prev_cpu(p, prev_cpu, nr_cpus);
 	if (cpu >= 0)
-		return cpu;
+		goto log_return;
 
 	/* 2) Search for the coldest permitted CPU with the shallowest DSQ. */
 	cpu = pick_cold_cpu(p, nr_cpus, &found_warm);
 	if (cpu >= 0)
-		return cpu;
+		goto log_return;
 
 	/*
 	 * 3) No cold CPUs remain. If we saw at least one warm candidate,
@@ -294,14 +345,19 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	 */
 	if (found_warm) {
 		steer_away_from_hot(p, nr_cpus);
-		return select_cpu_default(p, prev_cpu, wake_flags);
+		cpu = select_cpu_default(p, prev_cpu, wake_flags);
+		goto log_return;
 	}
 
 	/*
 	 * 4) Every allowed CPU is hot (or none were eligible). Fall back
 	 *    without exclusions so the kernel can pick the least bad CPU.
 	 */
-	return select_cpu_default(p, prev_cpu, wake_flags);
+	cpu = select_cpu_default(p, prev_cpu, wake_flags);
+
+log_return:
+	log_sched_decision(p, prev_cpu, cpu);
+	return cpu;
 }
 
 void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
