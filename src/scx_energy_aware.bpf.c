@@ -58,8 +58,99 @@ struct {
 	__type(value, struct sched_log_state);
 } sched_log_state_map SEC(".maps");
 
+#define SCHED_TEMP_LOG_BUF_SZ 768
+
+struct sched_temp_log_buf {
+	char buf[SCHED_TEMP_LOG_BUF_SZ];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct sched_temp_log_buf);
+} sched_temp_log_buf_map SEC(".maps");
+
 static __u64 last_printed_ts;
 #define SCHED_DECISION_LOG_INTERVAL_NS (100ULL * 1000 * 1000)
+
+static __always_inline __u32 clamp_temp_count(__u32 count)
+{
+	if (!count || count > MAX_CORE_TEMPS)
+		return MAX_CORE_TEMPS;
+	return count;
+}
+
+static __always_inline __u32 temp_count_for_log(void)
+{
+	struct rapl_stats *stats;
+	__u32 key = 0;
+	__u32 stats_count = 0;
+	__u32 *count;
+
+	stats = bpf_map_lookup_elem(&rapl_stats_map, &key);
+	if (stats)
+		stats_count = stats->core_count;
+
+	count = bpf_map_lookup_elem(&core_temp_count_map, &key);
+	if (count && *count)
+		return clamp_temp_count(*count);
+
+	return clamp_temp_count(stats_count);
+}
+
+static __always_inline void format_temp_map_string(struct sched_temp_log_buf *buf,
+						   __u32 temp_count)
+{
+	int pos;
+	__u32 i;
+
+	if (!buf)
+		return;
+
+	pos = bpf_snprintf(buf->buf, SCHED_TEMP_LOG_BUF_SZ, "{");
+	if (pos < 0)
+		return;
+#pragma clang loop unroll(disable)
+	for (i = 0; i < MAX_CORE_TEMPS; i++) {
+		__u32 key = i;
+		__u32 temp = 0;
+		bool valid = false;
+		int ret;
+
+		if (i >= temp_count)
+			break;
+
+		if (pos >= SCHED_TEMP_LOG_BUF_SZ)
+			break;
+
+		__u32 *temp_val = bpf_map_lookup_elem(&core_temp_map, &key);
+		if (temp_val) {
+			temp = *temp_val;
+			valid = true;
+		}
+
+		ret = bpf_snprintf(buf->buf + pos,
+				   SCHED_TEMP_LOG_BUF_SZ - pos,
+				   "%s%u:%uC%s",
+				   i ? " " : "",
+				   i,
+				   temp,
+				   valid ? "" : "?");
+		if (ret < 0)
+			break;
+
+		pos += ret;
+	}
+
+	if (pos >= SCHED_TEMP_LOG_BUF_SZ) {
+		buf->buf[SCHED_TEMP_LOG_BUF_SZ - 1] = '\0';
+		return;
+	}
+
+	if (bpf_snprintf(buf->buf + pos, SCHED_TEMP_LOG_BUF_SZ - pos, "}") < 0)
+		buf->buf[SCHED_TEMP_LOG_BUF_SZ - 1] = '\0';
+}
 
 static __always_inline bool sched_log_should_emit(__u64 now)
 {
@@ -85,6 +176,9 @@ static __always_inline void log_sched_decision(struct task_struct *p, s32 prev_c
 					       s32 next_cpu)
 {
 	__u64 now;
+	const char *temp_summary = "<temp_map_unavail>";
+	struct sched_temp_log_buf *temp_buf;
+	__u32 buf_key = 0;
 
 	if (next_cpu < 0)
 		return;
@@ -93,9 +187,15 @@ static __always_inline void log_sched_decision(struct task_struct *p, s32 prev_c
 	if (!sched_log_should_emit(now))
 		return;
 
-	if(prev_cpu != next_cpu)
-		bpf_printk("SCX sched pid=%d comm=%s prev=%d next=%d",
-		   p->pid, p->comm, prev_cpu, next_cpu);
+	temp_buf = bpf_map_lookup_elem(&sched_temp_log_buf_map, &buf_key);
+	if (temp_buf) {
+		format_temp_map_string(temp_buf, temp_count_for_log());
+		temp_summary = temp_buf->buf;
+	}
+
+	if (prev_cpu != next_cpu)
+		bpf_printk("SCX sched pid=%d comm=%s prev=%d next=%d temps=%s",
+			   p->pid, p->comm, prev_cpu, next_cpu, temp_summary);
 }
 
 static __u32 clamp_nr_cpus(void)
