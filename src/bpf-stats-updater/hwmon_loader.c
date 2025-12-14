@@ -236,6 +236,12 @@ static enum core_status determine_core_state(int state_map_fd, __u32 key, __u32 
 static void update_core_temp_map(int temps_map_fd, int state_map_fd,
 				 const struct core_sensor *sensors, int count)
 {
+	__u32 temps[MAX_CORE_TEMPS] = {};
+	bool has_value[MAX_CORE_TEMPS] = {};
+	unsigned long long total_temp = 0;
+	unsigned int nonzero_count = 0;
+	__u32 avg_temp = 0;
+
 	for (int i = 0; i < count; i++) {
 		const struct core_sensor *sensor = &sensors[i];
 		FILE *fp = fopen(sensor->input_path, "r");
@@ -266,9 +272,31 @@ static void update_core_temp_map(int temps_map_fd, int state_map_fd,
 		if (val > UINT_MAX)
 			val = UINT_MAX;
 
-		__u32 temp = (__u32)val;
+		temps[i] = (__u32)val;
+		has_value[i] = true;
+		if (temps[i] > 0) {
+			total_temp += temps[i];
+			nonzero_count++;
+		}
+	}
+
+	if (nonzero_count > 0)
+		avg_temp = total_temp / nonzero_count;
+
+	for (int i = 0; i < count; i++) {
+		const struct core_sensor *sensor = &sensors[i];
 		__u32 key = sensor->core_idx;
-		enum core_status state = determine_core_state(state_map_fd, key, temp);
+		__u32 temp;
+		enum core_status state;
+
+		if (!has_value[i])
+			continue;
+
+		temp = temps[i];
+		if (temp == 0 && avg_temp > 0)
+			temp = avg_temp; /* fall back to average when the sensor reads 0 */
+
+		state = determine_core_state(state_map_fd, key, temp);
 
 		if (bpf_map_update_elem(temps_map_fd, &key, &temp, BPF_ANY))
 			fprintf(stderr,
