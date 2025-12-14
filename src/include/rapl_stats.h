@@ -1,6 +1,24 @@
 #ifndef RAPL_STATS_H
 #define RAPL_STATS_H
 
+#if defined(__has_include)
+#  if __has_include("temp_thresholds.h")
+#    include "temp_thresholds.h"
+#  endif
+#endif
+
+#ifndef TEMP_THRESHOLD_WARM
+#define TEMP_THRESHOLD_WARM 55
+#endif
+
+#ifndef TEMP_THRESHOLD_HOT
+#define TEMP_THRESHOLD_HOT 60
+#endif
+
+#ifndef TEMP_THRESHOLD_THROTTLE
+#define TEMP_THRESHOLD_THROTTLE 85
+#endif
+
 #define energy_t unsigned long long
 #define power_t unsigned long long
 #define time_t_ns unsigned long long

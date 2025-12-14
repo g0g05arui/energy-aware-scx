@@ -12,6 +12,8 @@
 #include <bpf/libbpf.h>
 
 #include "../include/rapl_stats.h"
+#include "../include/core_state.h"
+#include "../include/temp_thresholds.h"
 
 static volatile sig_atomic_t keep_running = 1;
 
@@ -211,7 +213,27 @@ static void sleep_interval(void)
 	usleep(TEMP_UPDATE_INTERVAL_MS * 1000);
 }
 
-static void update_core_temp_map(int temps_map_fd,
+static enum core_status determine_core_state(int state_map_fd, __u32 key, __u32 temp)
+{
+	enum core_status prev = CORE_COLD;
+
+	if (state_map_fd >= 0) {
+		enum core_status stored;
+
+		if (bpf_map_lookup_elem(state_map_fd, &key, &stored) == 0)
+			prev = stored;
+	}
+
+	if (temp < TEMP_THRESHOLD_WARM)
+		return CORE_COLD;
+	if (temp >= TEMP_THRESHOLD_HOT)
+		return CORE_HOT;
+	if (prev == CORE_HOT)
+		return CORE_HOT;
+	return CORE_WARM;
+}
+
+static void update_core_temp_map(int temps_map_fd, int state_map_fd,
 				 const struct core_sensor *sensors, int count)
 {
 	for (int i = 0; i < count; i++) {
@@ -246,10 +268,16 @@ static void update_core_temp_map(int temps_map_fd,
 
 		__u32 temp = (__u32)val;
 		__u32 key = sensor->core_idx;
+		enum core_status state = determine_core_state(state_map_fd, key, temp);
 
 		if (bpf_map_update_elem(temps_map_fd, &key, &temp, BPF_ANY))
 			fprintf(stderr,
 				"WARNING: failed to update core_temp_map[%u]: %s\n",
+				key, strerror(errno));
+		if (state_map_fd >= 0 &&
+		    bpf_map_update_elem(state_map_fd, &key, &state, BPF_ANY))
+			fprintf(stderr,
+				"WARNING: failed to update core_state_map[%u]: %s\n",
 				key, strerror(errno));
 	}
 }
@@ -259,13 +287,16 @@ int main(int argc, char **argv)
 	const char *bpf_obj_path = argc > 1 ? argv[1] : "hwmon_stats_interval.bpf.o";
 	const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
 	const char *temp_count_pin_path = "/sys/fs/bpf/rapl_temp_count";
+	const char *state_pin_path = "/sys/fs/bpf/rapl_core_states";
 	struct bpf_object *obj = NULL;
 	int temps_map_fd;
 	int temp_count_map_fd;
+	int state_map_fd;
 	int err = 0;
 	int mapped_cores = 0;
 	bool temps_pinned = false;
 	bool temp_count_pinned = false;
+	bool state_pinned = false;
 	struct core_sensor sensors[MAX_CORE_TEMPS] = {};
 
 	signal(SIGINT, sig_handler);
@@ -314,6 +345,21 @@ int main(int argc, char **argv)
 	}
 	temp_count_pinned = true;
 
+	state_map_fd = bpf_object__find_map_fd_by_name(obj, "core_state_map");
+	if (state_map_fd < 0) {
+		fprintf(stderr, "ERROR: core_state_map not found in object\n");
+		err = -ENOENT;
+		goto cleanup;
+	}
+
+	err = bpf_obj_pin(state_map_fd, state_pin_path);
+	if (err && errno != EEXIST) {
+		fprintf(stderr, "ERROR: failed to pin core_state_map at %s: %s\n",
+			state_pin_path, strerror(errno));
+		goto cleanup;
+	}
+	state_pinned = true;
+
 	mapped_cores = discover_core_sensors(sensors, ARRAY_SIZE(sensors));
 	if (mapped_cores < 0) {
 		err = mapped_cores;
@@ -333,12 +379,13 @@ int main(int argc, char **argv)
 
 	printf("HWMON stats updater running (%d mapped cores)\n", mapped_cores);
 	printf("Per-core temps pinned at: %s\n", temps_pin_path);
+	printf("Per-core states pinned at: %s\n", state_pin_path);
 	printf("Core temp count pinned at: %s\n", temp_count_pin_path);
 	printf("Polling hwmon sensors every %d ms. Press Ctrl+C to stop.\n\n",
 	       TEMP_UPDATE_INTERVAL_MS);
 
 	while (keep_running) {
-		update_core_temp_map(temps_map_fd, sensors, mapped_cores);
+		update_core_temp_map(temps_map_fd, state_map_fd, sensors, mapped_cores);
 		sleep_interval();
 	}
 
@@ -351,6 +398,8 @@ cleanup:
 		unlink(temps_pin_path);
 	if (temp_count_pinned)
 		unlink(temp_count_pin_path);
+	if (state_pinned)
+		unlink(state_pin_path);
 
 	return err != 0;
 }
