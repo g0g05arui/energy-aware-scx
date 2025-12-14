@@ -99,29 +99,56 @@ static __always_inline __u32 temp_count_for_log(void)
 	return clamp_temp_count(stats_count);
 }
 
+static __always_inline int sched_temp_buf_append(struct sched_temp_log_buf *buf, int pos,
+						 const char *fmt, __u64 *data,
+						 __u32 data_len)
+{
+	int ret;
+	__u32 avail;
+
+	if (!buf)
+		return -1;
+
+	if (pos < 0)
+		return -1;
+
+	if (pos >= SCHED_TEMP_LOG_BUF_SZ)
+		return -1;
+
+	avail = SCHED_TEMP_LOG_BUF_SZ - pos;
+	if (!avail)
+		return -1;
+
+	ret = bpf_snprintf(buf->buf + pos, avail, fmt, data, data_len);
+	if (ret < 0)
+		return ret;
+
+	return pos + ret;
+}
+
 static __always_inline void format_temp_map_string(struct sched_temp_log_buf *buf,
 						   __u32 temp_count)
 {
-	int pos;
+	int pos = 0;
 	__u32 i;
 
 	if (!buf)
 		return;
 
-	pos = bpf_snprintf(buf->buf, SCHED_TEMP_LOG_BUF_SZ, "{");
+	pos = sched_temp_buf_append(buf, pos, "{", NULL, 0);
 	if (pos < 0)
-		return;
+		goto out;
+
 #pragma clang loop unroll(disable)
 	for (i = 0; i < MAX_CORE_TEMPS; i++) {
 		__u32 key = i;
 		__u32 temp = 0;
 		bool valid = false;
-		int ret;
+		const char *sep;
+		const char *suffix;
+		__u64 args[4];
 
 		if (i >= temp_count)
-			break;
-
-		if (pos >= SCHED_TEMP_LOG_BUF_SZ)
 			break;
 
 		__u32 *temp_val = bpf_map_lookup_elem(&core_temp_map, &key);
@@ -130,26 +157,27 @@ static __always_inline void format_temp_map_string(struct sched_temp_log_buf *bu
 			valid = true;
 		}
 
-		ret = bpf_snprintf(buf->buf + pos,
-				   SCHED_TEMP_LOG_BUF_SZ - pos,
-				   "%s%u:%uC%s",
-				   i ? " " : "",
-				   i,
-				   temp,
-				   valid ? "" : "?");
-		if (ret < 0)
-			break;
+		sep = i ? " " : "";
+		suffix = valid ? "" : "?";
+		args[0] = (__u64)(unsigned long)sep;
+		args[1] = i;
+		args[2] = temp;
+		args[3] = (__u64)(unsigned long)suffix;
 
-		pos += ret;
+		pos = sched_temp_buf_append(buf, pos, "%s%u:%uC%s", args, 4);
+		if (pos < 0)
+			goto out;
 	}
 
-	if (pos >= SCHED_TEMP_LOG_BUF_SZ) {
-		buf->buf[SCHED_TEMP_LOG_BUF_SZ - 1] = '\0';
-		return;
-	}
+	pos = sched_temp_buf_append(buf, pos, "}", NULL, 0);
 
-	if (bpf_snprintf(buf->buf + pos, SCHED_TEMP_LOG_BUF_SZ - pos, "}") < 0)
-		buf->buf[SCHED_TEMP_LOG_BUF_SZ - 1] = '\0';
+out:
+	if (pos < 0)
+		pos = 0;
+	else if (pos >= SCHED_TEMP_LOG_BUF_SZ)
+		pos = SCHED_TEMP_LOG_BUF_SZ - 1;
+
+	buf->buf[pos] = '\0';
 }
 
 static __always_inline bool sched_log_should_emit(__u64 now)
