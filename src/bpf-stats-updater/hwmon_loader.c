@@ -234,7 +234,8 @@ static enum core_status determine_core_state(int state_map_fd, __u32 key, __u32 
 }
 
 static void update_core_temp_map(int temps_map_fd, int state_map_fd,
-				 const struct core_sensor *sensors, int count)
+				 const struct core_sensor *sensors, int sensor_count,
+				 __u32 slot_count)
 {
 	__u32 temps[MAX_CORE_TEMPS] = {};
 	bool has_value[MAX_CORE_TEMPS] = {};
@@ -242,10 +243,17 @@ static void update_core_temp_map(int temps_map_fd, int state_map_fd,
 	unsigned int nonzero_count = 0;
 	__u32 avg_temp = 0;
 
-	for (int i = 0; i < count; i++) {
+	if (slot_count > MAX_CORE_TEMPS)
+		slot_count = MAX_CORE_TEMPS;
+
+	for (int i = 0; i < sensor_count; i++) {
 		const struct core_sensor *sensor = &sensors[i];
 		FILE *fp = fopen(sensor->input_path, "r");
 		long val;
+		__u32 idx = sensor->core_idx;
+
+		if (idx >= MAX_CORE_TEMPS)
+			continue;
 
 		if (!fp) {
 			fprintf(stderr,
@@ -272,10 +280,10 @@ static void update_core_temp_map(int temps_map_fd, int state_map_fd,
 		if (val > UINT_MAX)
 			val = UINT_MAX;
 
-		temps[i] = (__u32)val;
-		has_value[i] = true;
-		if (temps[i] > 0) {
-			total_temp += temps[i];
+		temps[idx] = (__u32)val;
+		has_value[idx] = true;
+		if (temps[idx] > 0) {
+			total_temp += temps[idx];
 			nonzero_count++;
 		}
 	}
@@ -283,30 +291,24 @@ static void update_core_temp_map(int temps_map_fd, int state_map_fd,
 	if (nonzero_count > 0)
 		avg_temp = total_temp / nonzero_count;
 
-	for (int i = 0; i < count; i++) {
-		const struct core_sensor *sensor = &sensors[i];
-		__u32 key = sensor->core_idx;
-		__u32 temp;
+	for (__u32 idx = 0; idx < slot_count; idx++) {
+		__u32 temp = has_value[idx] ? temps[idx] : 0;
 		enum core_status state;
 
-		if (!has_value[i])
-			continue;
-
-		temp = temps[i];
 		if (temp == 0 && avg_temp > 0)
-			temp = avg_temp; /* fall back to average when the sensor reads 0 */
+			temp = avg_temp; /* fill missing temps with the average */
 
-		state = determine_core_state(state_map_fd, key, temp);
+		state = determine_core_state(state_map_fd, idx, temp);
 
-		if (bpf_map_update_elem(temps_map_fd, &key, &temp, BPF_ANY))
+		if (bpf_map_update_elem(temps_map_fd, &idx, &temp, BPF_ANY))
 			fprintf(stderr,
 				"WARNING: failed to update core_temp_map[%u]: %s\n",
-				key, strerror(errno));
+				idx, strerror(errno));
 		if (state_map_fd >= 0 &&
-		    bpf_map_update_elem(state_map_fd, &key, &state, BPF_ANY))
+		    bpf_map_update_elem(state_map_fd, &idx, &state, BPF_ANY))
 			fprintf(stderr,
 				"WARNING: failed to update core_state_map[%u]: %s\n",
-				key, strerror(errno));
+				idx, strerror(errno));
 	}
 }
 
@@ -322,6 +324,7 @@ int main(int argc, char **argv)
 	int state_map_fd;
 	int err = 0;
 	int mapped_cores = 0;
+	__u32 slot_count = 0;
 	bool temps_pinned = false;
 	bool temp_count_pinned = false;
 	bool state_pinned = false;
@@ -393,10 +396,22 @@ int main(int argc, char **argv)
 		err = mapped_cores;
 		goto cleanup;
 	}
+	for (int i = 0; i < mapped_cores; i++) {
+		__u32 idx = sensors[i].core_idx;
+
+		if (idx >= MAX_CORE_TEMPS)
+			continue;
+		if (idx + 1 > slot_count)
+			slot_count = idx + 1;
+	}
+	if (slot_count == 0)
+		slot_count = mapped_cores;
+	if (slot_count > MAX_CORE_TEMPS)
+		slot_count = MAX_CORE_TEMPS;
 
 	{
 		__u32 key = 0;
-		__u32 count = mapped_cores;
+		__u32 count = slot_count;
 		if (count > MAX_CORE_TEMPS)
 			count = MAX_CORE_TEMPS;
 		if (bpf_map_update_elem(temp_count_map_fd, &key, &count, BPF_ANY))
@@ -405,7 +420,8 @@ int main(int argc, char **argv)
 				strerror(errno));
 	}
 
-	printf("HWMON stats updater running (%d mapped cores)\n", mapped_cores);
+	printf("HWMON stats updater running (%d sensors, %u core slots)\n",
+	       mapped_cores, slot_count);
 	printf("Per-core temps pinned at: %s\n", temps_pin_path);
 	printf("Per-core states pinned at: %s\n", state_pin_path);
 	printf("Core temp count pinned at: %s\n", temp_count_pin_path);
@@ -413,7 +429,8 @@ int main(int argc, char **argv)
 	       TEMP_UPDATE_INTERVAL_MS);
 
 	while (keep_running) {
-		update_core_temp_map(temps_map_fd, state_map_fd, sensors, mapped_cores);
+		update_core_temp_map(temps_map_fd, state_map_fd, sensors, mapped_cores,
+				     slot_count);
 		sleep_interval();
 	}
 
