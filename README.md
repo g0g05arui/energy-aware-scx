@@ -178,6 +178,29 @@ bpf_map_lookup_elem(map_fd, &key, &stats);
 
 3. Use `stats.package_power`, `stats.core_count`, etc. from the stats map, and fetch per-core temperatures from `/sys/fs/bpf/rapl_temps` (keys are core indices) for scheduling decisions
 
+### Topology-aware scheduler controls
+
+The `scx_energy_aware` scheduler and auxiliary daemons now derive physical core groupings from each CPU's `/sys/devices/system/cpu/cpuX/topology/thread_siblings_list`. This discovery stage feeds several BPF maps (`cpu_to_core_gid_map`, `core_primary_cpu_map`, `core_siblings_map`, and the per-core temperature/state maps) so that every decision is made at the physical-core granularity instead of per-thread.
+
+You can inspect what the loader discovered with:
+
+```bash
+./build/scx_energy_aware --dump-topology
+```
+
+Example output from a 40-thread machine (SMT2) looks like:
+
+```
+core_gid siblings             primary_cpu
+0        0,20                 0
+1        1,21                 1
+2        2,22                 2
+...
+19       19,39                19
+```
+
+The loader also exposes an SMT placement knob. `--prefer-primary` (the default) spreads work across the primary threads of each core before scheduling on siblings. `--no-prefer-primary` or `--prefer-primary=0` reverts to packing both siblings immediately. All of the topology data is pushed into the scheduler BPF maps before the struct_ops program is attached.
+
 ## Troubleshooting
 
 ### "scx/common.bpf.h not found"

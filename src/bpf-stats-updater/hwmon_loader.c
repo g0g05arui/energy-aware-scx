@@ -14,6 +14,7 @@
 #include "../include/rapl_stats.h"
 #include "../include/core_state.h"
 #include "../include/temp_thresholds.h"
+#include "../include/topology.h"
 
 static volatile sig_atomic_t keep_running = 1;
 
@@ -49,7 +50,7 @@ static bool parse_core_label(const char *label, __u32 *core_idx)
 }
 
 struct core_sensor {
-	__u32 core_idx;
+	__u32 cpu_id;
 	char input_path[PATH_MAX];
 };
 
@@ -74,14 +75,18 @@ static int load_hwmon_name(const char *hwmon_dir, char *buf, size_t buflen)
 	return 0;
 }
 
-static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors)
+static int discover_core_sensors(const struct topo *topo,
+				 struct core_sensor *sensors, size_t max_sensors)
 {
 	DIR *root;
 	struct dirent *hwde;
 	size_t count = 0;
-	bool seen[MAX_CORE_TEMPS] = {};
-	size_t next_core_idx = 0;
 	const char *hwmon_root = "/sys/class/hwmon";
+	bool seen[MAX_CORE_TEMPS] = {};
+	size_t next_core_gid = 0;
+
+	if (!topo)
+		return -EINVAL;
 
 	root = opendir(hwmon_root);
 	if (!root) {
@@ -111,14 +116,15 @@ static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors
 
 		char hwmon_name[64] = {};
 		bool is_coretemp = false;
-		size_t base_idx = 0;
-		size_t dir_max_core = 0;
-		bool dir_has_core = false;
+		size_t pkg_base_gid = 0;
+		size_t pkg_next_gid = 0;
+		bool pkg_has_core = false;
 
 		if (!load_hwmon_name(hwmon_dir, hwmon_name, sizeof(hwmon_name)) &&
 		    strcmp(hwmon_name, "coretemp") == 0) {
 			is_coretemp = true;
-			base_idx = next_core_idx;
+			pkg_base_gid = next_core_gid;
+			pkg_next_gid = pkg_base_gid;
 		}
 
 		while ((entry = readdir(sensor_dir)) != NULL) {
@@ -152,22 +158,43 @@ static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors
 			if (!parse_core_label(label, &core_idx))
 				continue;
 
-			__u32 idx = core_idx;
-			if (is_coretemp)
-				idx = base_idx + core_idx;
+			__u32 target_cpu = core_idx;
+			__u32 target_gid = TOPO_GID_INVALID;
 
-			if (idx >= MAX_CORE_TEMPS)
-				continue;
-			if (seen[idx])
+			if (is_coretemp) {
+				if (pkg_next_gid >= topo->nr_cores ||
+				    pkg_next_gid >= MAX_CORE_TEMPS)
+					continue;
+
+				const struct topo_core *core =
+					topo_core_by_gid(topo, pkg_next_gid);
+				if (!core)
+					continue;
+
+				target_cpu = core->primary_cpu;
+				pkg_has_core = true;
+				target_gid = pkg_next_gid++;
+			} else {
+				if (core_idx >= TOPO_MAX_CPUS)
+					continue;
+				if (!topo_cpu_allowed(topo, target_cpu))
+					continue;
+				target_gid = topo_core_gid_for_cpu(topo, target_cpu);
+				if (target_gid == TOPO_GID_INVALID ||
+				    target_gid >= MAX_CORE_TEMPS)
+					continue;
+			}
+
+			if (seen[target_gid])
 				continue;
 			if (count >= max_sensors) {
 				fprintf(stderr,
-					"WARNING: too many core sensors, ignoring core %u\n",
-					core_idx);
+					"WARNING: too many core sensors, ignoring core gid %u\n",
+					target_gid);
 				continue;
 			}
 
-			sensors[count].core_idx = idx;
+			sensors[count].cpu_id = target_cpu;
 			if (snprintf(sensors[count].input_path,
 				     sizeof(sensors[count].input_path),
 				     "%s/temp%d_input", hwmon_dir, temp_id) >=
@@ -177,24 +204,17 @@ static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors
 					hwde->d_name, temp_id);
 				continue;
 			}
-			seen[idx] = true;
-			if (is_coretemp) {
-				dir_has_core = true;
-				if (core_idx > dir_max_core)
-					dir_max_core = core_idx;
-			}
-			printf("Mapped %s temp%d (%s) -> core %u\n", hwde->d_name,
-			       temp_id, label, idx);
+			printf("Mapped %s temp%d (%s) -> cpu %u (core gid %u)\n",
+			       hwde->d_name, temp_id, label, sensors[count].cpu_id,
+			       target_gid);
+			seen[target_gid] = true;
 			count++;
 		}
 
 		closedir(sensor_dir);
 
-		if (is_coretemp && dir_has_core) {
-			size_t pkg_cores = dir_max_core + 1;
-			if (base_idx + pkg_cores > next_core_idx)
-				next_core_idx = base_idx + pkg_cores;
-		}
+		if (is_coretemp && pkg_has_core)
+			next_core_gid = pkg_next_gid;
 	}
 
 	closedir(root);
@@ -205,7 +225,7 @@ static int discover_core_sensors(struct core_sensor *sensors, size_t max_sensors
 		return -ENOENT;
 	}
 
-	return count;
+	return (int)count;
 }
 
 static void sleep_interval(void)
@@ -234,15 +254,17 @@ static enum core_status determine_core_state(int state_map_fd, __u32 key, __u32 
 }
 
 static void update_core_temp_map(int temps_map_fd, int state_map_fd,
-				 const struct core_sensor *sensors, int sensor_count,
-				 __u32 slot_count)
+				 const struct topo *topo,
+				 const struct core_sensor *sensors, int sensor_count)
 {
 	__u32 temps[MAX_CORE_TEMPS] = {};
 	bool has_value[MAX_CORE_TEMPS] = {};
-	unsigned long long total_temp = 0;
-	unsigned int nonzero_count = 0;
-	__u32 avg_temp = 0;
+	__u32 slot_count;
 
+	if (!topo)
+		return;
+
+	slot_count = topo->nr_cores;
 	if (slot_count > MAX_CORE_TEMPS)
 		slot_count = MAX_CORE_TEMPS;
 
@@ -250,53 +272,44 @@ static void update_core_temp_map(int temps_map_fd, int state_map_fd,
 		const struct core_sensor *sensor = &sensors[i];
 		FILE *fp = fopen(sensor->input_path, "r");
 		long val;
-		__u32 idx = sensor->core_idx;
+		__u32 gid = topo_core_gid_for_cpu(topo, sensor->cpu_id);
 
-		if (idx >= MAX_CORE_TEMPS)
+		if (gid == TOPO_GID_INVALID || gid >= slot_count)
 			continue;
 
 		if (!fp) {
 			fprintf(stderr,
 				"WARNING: failed to open %s: %s (core %u)\n",
 				sensor->input_path, strerror(errno),
-				sensor->core_idx);
+				sensor->cpu_id);
 			continue;
 		}
 		if (fscanf(fp, "%ld", &val) != 1) {
 			fprintf(stderr,
 				"WARNING: failed to read %s: %s (core %u)\n",
 				sensor->input_path, strerror(errno),
-				sensor->core_idx);
+				sensor->cpu_id);
 			fclose(fp);
 			continue;
 		}
 		fclose(fp);
 
-		if (val < 0)
-			val = 0;
+		if (val <= 0)
+			continue;
 
 		/* hwmon temps are in millidegrees C, convert to whole degrees */
 		val /= 1000;
 		if (val > UINT_MAX)
 			val = UINT_MAX;
 
-		temps[idx] = (__u32)val;
-		has_value[idx] = true;
-		if (temps[idx] > 0) {
-			total_temp += temps[idx];
-			nonzero_count++;
-		}
+		if (!has_value[gid] || (__u32)val > temps[gid])
+			temps[gid] = (__u32)val;
+		has_value[gid] = true;
 	}
-
-	if (nonzero_count > 0)
-		avg_temp = total_temp / nonzero_count;
 
 	for (__u32 idx = 0; idx < slot_count; idx++) {
 		__u32 temp = has_value[idx] ? temps[idx] : 0;
 		enum core_status state;
-
-		if (temp == 0 && avg_temp > 0)
-			temp = avg_temp; /* fill missing temps with the average */
 
 		state = determine_core_state(state_map_fd, idx, temp);
 
@@ -329,6 +342,7 @@ int main(int argc, char **argv)
 	bool temp_count_pinned = false;
 	bool state_pinned = false;
 	struct core_sensor sensors[MAX_CORE_TEMPS] = {};
+	struct topo topo = {};
 
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
@@ -391,23 +405,37 @@ int main(int argc, char **argv)
 	}
 	state_pinned = true;
 
-	mapped_cores = discover_core_sensors(sensors, ARRAY_SIZE(sensors));
+	err = topo_discover(&topo);
+	if (err) {
+		fprintf(stderr, "ERROR: failed to discover topology: %s\n",
+			strerror(-err));
+		goto cleanup;
+	}
+
+	if (topo.nr_cores == 0) {
+		fprintf(stderr, "ERROR: topology discovery returned zero cores\n");
+		err = -ENOENT;
+		goto cleanup;
+	}
+	if (topo.nr_cores > MAX_CORE_TEMPS) {
+		fprintf(stderr,
+			"ERROR: topology has %u cores but MAX_CORE_TEMPS=%u; rebuild with larger MAX_CORE_TEMPS\n",
+			topo.nr_cores, MAX_CORE_TEMPS);
+		err = -E2BIG;
+		goto cleanup;
+	}
+
+	slot_count = topo.nr_cores;
+
+	printf("Topology: %u CPUs across %u cores (max CPU id %u)\n",
+	       topo.nr_cpus, topo.nr_cores,
+	       topo.max_cpu_id ? topo.max_cpu_id - 1 : 0);
+
+	mapped_cores = discover_core_sensors(&topo, sensors, ARRAY_SIZE(sensors));
 	if (mapped_cores < 0) {
 		err = mapped_cores;
 		goto cleanup;
 	}
-	for (int i = 0; i < mapped_cores; i++) {
-		__u32 idx = sensors[i].core_idx;
-
-		if (idx >= MAX_CORE_TEMPS)
-			continue;
-		if (idx + 1 > slot_count)
-			slot_count = idx + 1;
-	}
-	if (slot_count == 0)
-		slot_count = mapped_cores;
-	if (slot_count > MAX_CORE_TEMPS)
-		slot_count = MAX_CORE_TEMPS;
 
 	{
 		__u32 key = 0;
@@ -420,7 +448,7 @@ int main(int argc, char **argv)
 				strerror(errno));
 	}
 
-	printf("HWMON stats updater running (%d sensors, %u core slots)\n",
+	printf("HWMON stats updater running (%d sensors, %u physical cores)\n",
 	       mapped_cores, slot_count);
 	printf("Per-core temps pinned at: %s\n", temps_pin_path);
 	printf("Per-core states pinned at: %s\n", state_pin_path);
@@ -429,8 +457,8 @@ int main(int argc, char **argv)
 	       TEMP_UPDATE_INTERVAL_MS);
 
 	while (keep_running) {
-		update_core_temp_map(temps_map_fd, state_map_fd, sensors, mapped_cores,
-				     slot_count);
+		update_core_temp_map(temps_map_fd, state_map_fd, &topo, sensors,
+				     mapped_cores);
 		sleep_interval();
 	}
 

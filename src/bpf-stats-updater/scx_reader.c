@@ -8,6 +8,7 @@
 #include <bpf/bpf.h>
 #include "../include/rapl_stats.h"
 #include "../include/core_state.h"
+#include "../include/topology.h"
 
 static const char *state_to_str(enum core_status state)
 {
@@ -23,16 +24,57 @@ static const char *state_to_str(enum core_status state)
     }
 }
 
+static void format_core_mapping(char *buf, size_t buflen,
+				const struct topo_core *core)
+{
+	if (!buf || buflen == 0)
+		return;
+
+	if (!core) {
+		snprintf(buf, buflen, "cpus:?");
+		return;
+	}
+
+	size_t off = 0;
+
+	off += snprintf(buf + off, buflen - off, "cpus:[");
+	if (core->siblings.sib_cnt == 0) {
+		off += snprintf(buf + off, buflen - off, "%u", core->primary_cpu);
+	} else {
+		for (__u32 i = 0; i < core->siblings.sib_cnt; i++) {
+			off += snprintf(buf + off, buflen - off, "%u%s",
+					core->siblings.sibs[i],
+					(i + 1 < core->siblings.sib_cnt) ? "," : "");
+			if (off >= buflen)
+				break;
+		}
+	}
+	snprintf(buf + (off < buflen ? off : buflen - 1),
+		 off < buflen ? buflen - off : 1, "]");
+}
+
 int main(int argc, char **argv) {
     const char *pin_path = "/sys/fs/bpf/rapl_stats";
     const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
     const char *temp_count_pin_path = "/sys/fs/bpf/rapl_temp_count";
     const char *state_pin_path = "/sys/fs/bpf/rapl_core_states";
+    double refresh_interval = 1.0; /* seconds */
+    useconds_t refresh_usecs;
+    if (argc > 1) {
+        char *end = NULL;
+        refresh_interval = strtod(argv[1], &end);
+        if (!end || *end != '\0' || refresh_interval <= 0.0)
+            refresh_interval = 1.0;
+    }
+    refresh_usecs = (useconds_t)(refresh_interval * 1000000.0);
+
     int map_fd;
     int temps_fd;
     int temp_count_fd;
     int state_fd;
     struct rapl_stats stats;
+    struct topo topo = {};
+    bool have_topology = false;
     __u32 key = 0;
     int err;
     
@@ -63,57 +105,83 @@ int main(int argc, char **argv) {
         fprintf(stderr, "WARNING: failed to open temp count map at %s: %s\n",
                 temp_count_pin_path, strerror(errno));
     }
+
+    if (!topo_discover(&topo))
+        have_topology = true;
+    else
+        fprintf(stderr,
+                "WARNING: failed to discover topology; core/cpu mapping unavailable.\n");
     
-    err = bpf_map_lookup_elem(map_fd, &key, &stats);
-    if (err) {
-        fprintf(stderr, "ERROR: failed to read from map: %s\n", strerror(errno));
-        close(map_fd);
-        close(temps_fd);
-        return 1;
-    }
-    
-    printf("RAPL Stats from BPF Map:\n");
-    printf("========================\n");
-    printf("Timestamp:      %llu ns\n", stats.timestamp);
-    printf("Delta Time:     %llu ns\n", stats.delta_time);
-    printf("\n");
-    printf("Package Power:  %llu W\n", stats.package_power);
-    printf("Package Energy: %llu J\n", stats.package_energy);
-    printf("Package Temp:   %u °C\n", stats.package_temp);
-    printf("\n");
-    printf("Core Power:     %llu W\n", stats.core_power);
-    printf("Core Energy:    %llu J\n", stats.core_energy);
-    printf("Core Count:     %u\n", stats.core_count);
-    __u32 temp_count = stats.core_count;
-    if (temp_count_fd >= 0) {
-        __u32 cnt_key = 0;
-        __u32 count_val = stats.core_count;
-        if (bpf_map_lookup_elem(temp_count_fd, &cnt_key, &count_val) == 0)
-            temp_count = count_val;
-    }
-    printf("Core Temps:     ");
-    for (unsigned int i = 0; i < temp_count; i++) {
-        __u32 idx = i;
-        __u32 temp = 0;
-        enum core_status state = CORE_COLD;
-        const char *state_str = "?";
-        bool has_temp = bpf_map_lookup_elem(temps_fd, &idx, &temp) == 0;
-        if (has_temp) {
-            if (state_fd >= 0 &&
+
+    while (true) {
+        __u32 temp_count = 0;
+
+        err = bpf_map_lookup_elem(map_fd, &key, &stats);
+        if (err) {
+            fprintf(stderr, "ERROR: failed to read from map: %s\n", strerror(errno));
+            break;
+        }
+
+        temp_count = stats.core_count;
+        if (temp_count_fd >= 0) {
+            __u32 cnt_key = 0;
+            __u32 count_val = stats.core_count;
+            if (bpf_map_lookup_elem(temp_count_fd, &cnt_key, &count_val) == 0)
+                temp_count = count_val;
+        }
+
+        printf("\033[H\033[J"); /* clear screen */
+        printf("RAPL Stats from BPF Map (refresh %.2fs, Ctrl+C to exit):\n",
+               refresh_interval);
+        printf("========================================\n");
+        printf("Timestamp:      %llu ns\n", stats.timestamp);
+        printf("Delta Time:     %llu ns\n", stats.delta_time);
+        printf("\n");
+        printf("Package Power:  %llu W\n", stats.package_power);
+        printf("Package Energy: %llu J\n", stats.package_energy);
+        printf("Package Temp:   %u °C\n", stats.package_temp);
+        printf("\n");
+        printf("Core Power:     %llu W\n", stats.core_power);
+        printf("Core Energy:    %llu J\n", stats.core_energy);
+        printf("Core Count:     %u\n", stats.core_count);
+        printf("Core Temps:\n");
+        if (have_topology && temp_count > topo.nr_cores)
+            temp_count = topo.nr_cores;
+
+        for (unsigned int i = 0; i < temp_count; i++) {
+            __u32 idx = i;
+            __u32 temp = 0;
+            enum core_status state = CORE_COLD;
+            const char *state_str = "?";
+            bool has_temp = bpf_map_lookup_elem(temps_fd, &idx, &temp) == 0;
+            char mapping[64] = "cpus:?";
+
+            if (have_topology) {
+                const struct topo_core *core = topo_core_by_gid(&topo, idx);
+
+                format_core_mapping(mapping, sizeof(mapping), core);
+            }
+
+            if (has_temp && state_fd >= 0 &&
                 bpf_map_lookup_elem(state_fd, &idx, &state) == 0)
                 state_str = state_to_str(state);
-            else
+            else if (!has_temp)
                 state_str = "n/a";
-            printf("%u(%s)", temp, state_str);
-        } else {
-            printf("?(n/a)");
+
+            if (has_temp)
+                printf("  Core %3u %-13s : %3u °C (%s)\n",
+                       i, mapping, temp, state_str);
+            else
+                printf("  Core %3u %-13s :   ? °C (%s)\n",
+                       i, mapping, state_str);
         }
-        if (i + 1 != temp_count)
-            printf(", ");
+        printf("\n");
+        printf("TDP:            %llu W\n", stats.tdp);
+        fflush(stdout);
+
+        if (usleep(refresh_usecs) != 0 && errno == EINTR)
+            break;
     }
-    printf(" °C\n");
-    printf("\n");
-    printf("TDP:            %llu W\n", stats.tdp);
     
     close(map_fd);
     close(temps_fd);

@@ -13,6 +13,7 @@
 #include <bpf/libbpf.h>
 
 #include "../include/rapl_stats.h"
+#include "../include/topology.h"
 
 #define UPDATE_INTERVAL_MS 100
 #define MAX_RAPL_DOMAINS   32
@@ -313,11 +314,36 @@ int main(int argc, char **argv)
 	int temp_count_fd = -1;
 	int err = 0;
 	struct rapl_sources sources;
+	struct topo topo = {};
 	unsigned int configured_core_count = 0;
 	bool stats_map_pinned = false;
 
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
+
+	err = topo_discover(&topo);
+	if (err) {
+		fprintf(stderr, "ERROR: failed to discover topology: %s\n",
+			strerror(-err));
+		goto cleanup;
+	}
+	if (topo.nr_cores == 0) {
+		fprintf(stderr, "ERROR: topology reported zero cores\n");
+		err = -ENOENT;
+		goto cleanup;
+	}
+	if (topo.nr_cores > MAX_CORE_TEMPS) {
+		fprintf(stderr,
+			"ERROR: topology has %u cores but MAX_CORE_TEMPS=%u; rebuild with a higher MAX_CORE_TEMPS\n",
+			topo.nr_cores, MAX_CORE_TEMPS);
+		err = -E2BIG;
+		goto cleanup;
+	}
+	configured_core_count = topo.nr_cores;
+
+	printf("Topology: %u CPUs across %u cores (max CPU id %u)\n",
+	       topo.nr_cpus, topo.nr_cores,
+	       topo.max_cpu_id ? topo.max_cpu_id - 1 : 0);
 
 	obj = bpf_object__open_file(bpf_obj_path, NULL);
 	if (libbpf_get_error(obj)) {
@@ -334,33 +360,17 @@ int main(int argc, char **argv)
 
 	config_map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_config_map");
 	if (config_map_fd >= 0) {
-		long cpu_cnt = sysconf(_SC_NPROCESSORS_ONLN);
-		struct rapl_config cfg = {};
+		struct rapl_config cfg = {
+			.core_count = topo.nr_cores,
+		};
 		__u32 cfg_key = 0;
 
-		if (cpu_cnt < 1)
-			cpu_cnt = 1;
-		if (cpu_cnt > MAX_CORE_TEMPS)
-			cpu_cnt = MAX_CORE_TEMPS;
-
-		cfg.core_count = cpu_cnt;
 		if (bpf_map_update_elem(config_map_fd, &cfg_key, &cfg, BPF_ANY))
 			fprintf(stderr, "WARNING: failed to set core_count config: %s\n",
 				strerror(errno));
-		configured_core_count = cfg.core_count;
 	} else {
 		fprintf(stderr,
 			"WARNING: rapl_config_map not found; using default core count 0\n");
-	}
-
-	if (configured_core_count == 0) {
-		long cpu_cnt = sysconf(_SC_NPROCESSORS_ONLN);
-
-		if (cpu_cnt < 1)
-			cpu_cnt = 1;
-		if (cpu_cnt > MAX_CORE_TEMPS)
-			cpu_cnt = MAX_CORE_TEMPS;
-		configured_core_count = cpu_cnt;
 	}
 
 	stats_map_fd = bpf_object__find_map_fd_by_name(obj, "rapl_stats_map");

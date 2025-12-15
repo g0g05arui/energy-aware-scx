@@ -47,7 +47,7 @@ BPF_CFLAGS = -O2 -g -target bpf -D__TARGET_ARCH_$(BPF_TARGET_ARCH) \
 
 BPF_SCX_CFLAGS = $(BPF_CFLAGS) -I$(SCX_INCLUDE)
 
-CFLAGS = -O2 -Wall -I$(INCLUDE_DIR)
+CFLAGS = -O2 -Wall -I$(INCLUDE_DIR) -I$(SCX_INCLUDE)
 LDFLAGS = -lbpf -lelf -lz
 
 BPF_OBJ = $(BUILD_DIR)/repl_stats_interval.bpf.o
@@ -62,6 +62,7 @@ ENERGY_LOADER = $(BUILD_DIR)/scx_energy_aware
 RAPL_CONSOLE = $(BUILD_DIR)/rapl_console_reader
 HWMON_READER = $(BUILD_DIR)/hwmon_console_reader
 
+TOPO_OBJ = $(BUILD_DIR)/topology.o
 
 .PHONY: all clean FORCE
 
@@ -97,16 +98,19 @@ $(HWMON_BPF_OBJ): $(SRC_DIR)/hwmon_stats_interval.bpf.c $(STATS_HEADERS)
 	$(CLANG) $(BPF_CFLAGS) -c $(SRC_DIR)/hwmon_stats_interval.bpf.c -o $(HWMON_BPF_OBJ)
 	@echo "HWMON BPF object built: $(HWMON_BPF_OBJ)"
 
-$(USER_BIN): $(SRC_DIR)/loader.c $(STATS_HEADERS) $(BPF_OBJ)
-	$(CC) $(CFLAGS) $(SRC_DIR)/loader.c -o $(USER_BIN) $(LDFLAGS)
+$(TOPO_OBJ): src/topology.c $(INCLUDE_DIR)/topology.h $(INCLUDE_DIR)/topology_defs.h
+	$(CC) $(CFLAGS) -c src/topology.c -o $(TOPO_OBJ)
+
+$(USER_BIN): $(SRC_DIR)/loader.c $(STATS_HEADERS) $(BPF_OBJ) $(TOPO_OBJ)
+	$(CC) $(CFLAGS) $(SRC_DIR)/loader.c $(TOPO_OBJ) -o $(USER_BIN) $(LDFLAGS)
 	@echo "Userspace program built: $(USER_BIN)"
 
-$(HWMON_LOADER): $(SRC_DIR)/hwmon_loader.c $(STATS_HEADERS) $(HWMON_BPF_OBJ)
-	$(CC) $(CFLAGS) $(SRC_DIR)/hwmon_loader.c -o $(HWMON_LOADER) $(LDFLAGS)
+$(HWMON_LOADER): $(SRC_DIR)/hwmon_loader.c $(STATS_HEADERS) $(HWMON_BPF_OBJ) $(TOPO_OBJ)
+	$(CC) $(CFLAGS) $(SRC_DIR)/hwmon_loader.c $(TOPO_OBJ) -o $(HWMON_LOADER) $(LDFLAGS)
 	@echo "HWMON stats loader built: $(HWMON_LOADER)"
 
-$(SCX_READER): $(SRC_DIR)/scx_reader.c $(STATS_HEADERS)
-	$(CC) $(CFLAGS) $(SRC_DIR)/scx_reader.c -o $(SCX_READER) $(LDFLAGS)
+$(SCX_READER): $(SRC_DIR)/scx_reader.c $(STATS_HEADERS) $(TOPO_OBJ)
+	$(CC) $(CFLAGS) $(SRC_DIR)/scx_reader.c $(TOPO_OBJ) -o $(SCX_READER) $(LDFLAGS)
 	@echo "SCX reader built: $(SCX_READER)"
 
 $(SCX_FIFO_BPF): src/scx_fifo.bpf.c
@@ -121,8 +125,8 @@ $(ENERGY_BPF_OBJ): src/scx_energy_aware.bpf.c $(STATS_HEADERS)
 	$(CLANG) $(BPF_SCX_CFLAGS) -c src/scx_energy_aware.bpf.c -o $(ENERGY_BPF_OBJ)
 	@echo "Energy-Aware scheduler BPF object built: $(ENERGY_BPF_OBJ)"
 
-$(ENERGY_LOADER): src/scx_energy_aware_loader.c $(ENERGY_BPF_OBJ)
-	$(CC) $(CFLAGS) src/scx_energy_aware_loader.c -o $(ENERGY_LOADER) $(LDFLAGS)
+$(ENERGY_LOADER): src/scx_energy_aware_loader.c $(ENERGY_BPF_OBJ) $(TOPO_OBJ)
+	$(CC) $(CFLAGS) src/scx_energy_aware_loader.c $(TOPO_OBJ) -o $(ENERGY_LOADER) $(LDFLAGS)
 	@echo "Energy-Aware scheduler loader built: $(ENERGY_LOADER)"
 
 $(RAPL_CONSOLE): src/rapl_console_reader.c
