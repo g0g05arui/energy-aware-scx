@@ -22,7 +22,7 @@
 #define energy_t unsigned long long
 #define power_t unsigned long long
 #define time_t_ns unsigned long long
-#define MAX_CORE_TEMPS 64
+#define MAX_CORE_TEMPS 256
 
 struct rapl_stats{
     power_t package_power;      
