@@ -492,7 +492,7 @@ void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable) {}
 s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 {
 	__u32 nr_cpus = scx_bpf_nr_cpu_ids();
-	struct dsq_loop_ctx ctx = {
+	struct dsq_loop_ctx loop_ctx = {
 		.nr_cpus = nr_cpus,
 		.err = 0,
 	};
@@ -500,10 +500,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 	if (nr_cpus > NR_CPUS)
 		nr_cpus = NR_CPUS;
 
-	ctx.nr_cpus = nr_cpus;
-	bpf_loop(nr_cpus, dsq_create_cb, &ctx, 0);
-	if (ctx.err)
-		return ctx.err;
+	loop_ctx.nr_cpus = nr_cpus;
+	bpf_loop(nr_cpus, dsq_create_cb, &loop_ctx, 0);
+	if (loop_ctx.err)
+		return loop_ctx.err;
 
 	dsq_nr_cpus = nr_cpus;
 	return 0;
@@ -511,7 +511,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 
 void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei)
 {
-	struct dsq_loop_ctx ctx = {
+	struct dsq_loop_ctx loop_ctx = {
 		.nr_cpus = dsq_nr_cpus,
 		.err = 0,
 	};
@@ -519,7 +519,7 @@ void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei)
 	if (!dsq_nr_cpus)
 		return;
 
-	bpf_loop(dsq_nr_cpus, dsq_destroy_cb, &ctx, 0);
+	bpf_loop(dsq_nr_cpus, dsq_destroy_cb, &loop_ctx, 0);
 }
 
 SEC(".struct_ops.link")
