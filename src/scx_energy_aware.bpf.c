@@ -327,6 +327,7 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 
 	if (!nr_cpus) {
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
+		bpf_printk("Switched to EEVDF scheduler");
 		goto log_return;
 	}
 
@@ -348,12 +349,13 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	if (found_warm) {
 		steer_away_from_hot(p, nr_cpus);
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
+		bpf_printk("Switched to EEVDF scheduler");
 		goto log_return;
 	}
 
 	/*
-	 * 4) Every allowed CPU is hot (or none were eligible). Fall back
-	 *    without exclusions so the kernel can pick the least bad CPU.
+	 * Every allowed CPU is hot (or none were eligible). Fall back
+	 * without exclusions so the kernel can pick the least bad CPU.
 	 */
 	cpu = select_cpu_default(p, prev_cpu, wake_flags);
 
@@ -369,7 +371,7 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
-	log_stats_from_map();
+	//log_stats_from_map();
 	scx_bpf_dsq_move_to_local(SCX_DSQ_LOCAL);
 }
 
