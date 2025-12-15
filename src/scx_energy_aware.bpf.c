@@ -23,10 +23,9 @@ static __always_inline __u64 cpu_dsq_id(s32 cpu)
 
 extern bool scx_bpf_cpu_can_run(struct task_struct *p, s32 cpu, bool allowed) __ksym __weak;
 
-/* Treat kernel threads as "EEVDF/default policy" */
+/* Kernel threads: treat as "default policy" */
 static __always_inline bool is_kernelish(struct task_struct *p)
 {
-	/* PF_KTHREAD covers kworker/*, and mm==NULL is an extra safety net */
 	return (p->flags & PF_KTHREAD) || !p->mm;
 }
 
@@ -309,7 +308,7 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 	bpf_loop(ENERGY_AWARE_MAX_CPUS, steer_cb, &ctx, 0);
 }
 
-/* cpu_can_run masks must cover the real cpu range - BUT NEVER TOUCH KTHREADS */
+/* cpu_can_run masks must cover the real cpu range - but never touch kernel threads */
 static __always_inline void allow_all_cpus(struct task_struct *p)
 {
 	if (is_kernelish(p))
@@ -344,6 +343,7 @@ static __always_inline s32 select_cpu_default(struct task_struct *p, s32 prev_cp
 					      u64 wake_flags)
 {
 	bool is_idle = false;
+
 	return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 }
 
@@ -358,7 +358,7 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 
 	(void)wake_flags;
 
-	/* Kernel threads: always default policy (EEVDF/CFS select) and no pinning */
+	/* Kernel threads: default CPU selection, no pinning/steering */
 	if (is_kernelish(p)) {
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
 		log_sched_decision(p, prev_cpu, cpu);
@@ -421,9 +421,9 @@ log_return:
 
 void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	/* Kernel threads: keep default behavior, avoid per-CPU DSQs */
+	/* Kernel threads: enqueue into built-in local DSQ (always valid) */
 	if (is_kernelish(p)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 		return;
 	}
 
@@ -448,12 +448,12 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
-	/* Drain per-CPU DSQ for user tasks */
+	/* Always drain built-in local DSQ first (kernel threads / fallback) */
+	scx_bpf_dsq_move_to_local(SCX_DSQ_LOCAL);
+
+	/* Then drain this CPU's per-CPU DSQ (user tasks) */
 	if ((__u32)cpu < dsq_nr_cpus)
 		scx_bpf_dsq_move_to_local(cpu_dsq_id(cpu));
-
-	/* Also drain global DSQ (kernel threads) */
-	scx_bpf_dsq_move_to_local(SCX_DSQ_GLOBAL);
 }
 
 void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
