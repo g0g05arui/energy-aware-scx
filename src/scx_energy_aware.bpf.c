@@ -6,32 +6,11 @@
 
 char _license[] SEC("license") = "GPL";
 
-#define DSQ_FLAG_BUILTIN_FALLBACK (1ULL << 63)
-#define DSQ_FLAG_LOCAL_ON_FALLBACK (1ULL << 62)
-#define DSQ_LOCAL_FALLBACK (DSQ_FLAG_BUILTIN_FALLBACK | 2ULL)
-#define DSQ_LOCAL_ON_BASE_FALLBACK (DSQ_FLAG_BUILTIN_FALLBACK | DSQ_FLAG_LOCAL_ON_FALLBACK)
-#define DSQ_LOCAL_CPU_MASK_FALLBACK (0xffffffffULL)
+#define ENERGY_AWARE_DSQ_BASE (1ULL << 32)
 
-static __always_inline __u64 local_dsq_id(void)
+static __always_inline __u64 cpu_dsq_id(s32 cpu)
 {
-	__u64 val = SCX_DSQ_LOCAL;
-
-	if (!val)
-		val = DSQ_LOCAL_FALLBACK;
-	return val;
-}
-
-static __always_inline __u64 local_on_dsq_id(s32 cpu)
-{
-	__u64 base = SCX_DSQ_LOCAL_ON;
-	__u64 mask = SCX_DSQ_LOCAL_CPU_MASK;
-
-	if (!base)
-		base = DSQ_LOCAL_ON_BASE_FALLBACK;
-	if (!mask)
-		mask = DSQ_LOCAL_CPU_MASK_FALLBACK;
-
-	return base | ((__u64)cpu & mask);
+	return ENERGY_AWARE_DSQ_BASE + (__u64)cpu;
 }
 
 #ifndef ENERGY_AWARE_MAX_CPUS
@@ -98,6 +77,7 @@ struct {
 
 static __u64 last_printed_ts;
 #define SCHED_DECISION_LOG_INTERVAL_NS (100ULL * 1000 * 1000)
+static __u32 dsq_nr_cpus;
 
 static __always_inline bool sched_log_should_emit(__u64 now)
 {
@@ -208,7 +188,7 @@ static long pick_cold_cb(u64 idx, void *data)
 
 	if (state == CORE_COLD) {
 		/* Measure depth of the per-CPU DSQ */
-		dsq_depth = scx_bpf_dsq_nr_queued(local_on_dsq_id(cpu));
+			dsq_depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(cpu));
 		depth = dsq_depth < 0 ? (__u32)-1 : (__u32)dsq_depth;
 
 		if (depth < ctx->best_depth) {
@@ -448,7 +428,7 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 	s32 cpu = -1;
-	__u64 dsq_id = local_dsq_id();
+	__u64 dsq_id = cpu_dsq_id((s32)bpf_get_smp_processor_id());
 	__u32 nr_cpus = clamp_nr_cpus();
 
 	tctx = bpf_task_storage_get(&task_ctx_map, p, 0, 0);
@@ -456,14 +436,15 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 		cpu = tctx->target_cpu;
 
 	if (cpu >= 0 && (__u32)cpu < nr_cpus)
-		dsq_id = local_on_dsq_id(cpu);
+		dsq_id = cpu_dsq_id(cpu);
 
 	scx_bpf_dsq_insert(p, dsq_id, SCX_SLICE_DFL, enq_flags);
 }
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
-	scx_bpf_dsq_move_to_local(local_dsq_id());
+	if ((__u32)cpu < dsq_nr_cpus)
+		scx_bpf_dsq_move_to_local(cpu_dsq_id(cpu));
 }
 
 void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
@@ -480,10 +461,30 @@ void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable) {}
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 {
+	__u32 nr_cpus = scx_bpf_nr_cpu_ids();
+	__u32 cpu;
+	s32 err;
+
+	if (nr_cpus > NR_CPUS)
+		nr_cpus = NR_CPUS;
+
+	for (cpu = 0; cpu < nr_cpus; cpu++) {
+		err = scx_bpf_create_dsq(cpu_dsq_id(cpu), -1);
+		if (err)
+			return err;
+	}
+
+	dsq_nr_cpus = nr_cpus;
 	return 0;
 }
 
-void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei) {}
+void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei)
+{
+	__u32 cpu;
+
+	for (cpu = 0; cpu < dsq_nr_cpus; cpu++)
+		scx_bpf_destroy_dsq(cpu_dsq_id(cpu));
+}
 
 SEC(".struct_ops.link")
 struct sched_ext_ops energy_aware_ops = {

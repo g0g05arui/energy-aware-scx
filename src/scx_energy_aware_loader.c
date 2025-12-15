@@ -28,12 +28,6 @@ static void sig_handler(int signo)
 	keep_running = 0;
 }
 
-#define DSQ_FLAG_BUILTIN_FALLBACK (1ULL << 63)
-#define DSQ_FLAG_LOCAL_ON_FALLBACK (1ULL << 62)
-#define DSQ_LOCAL_FALLBACK (DSQ_FLAG_BUILTIN_FALLBACK | 2ULL)
-#define DSQ_LOCAL_ON_BASE_FALLBACK \
-	(DSQ_FLAG_BUILTIN_FALLBACK | DSQ_FLAG_LOCAL_ON_FALLBACK)
-#define DSQ_LOCAL_CPU_MASK_FALLBACK (0xffffffffULL)
 #define SCX_SLICE_DFL_FALLBACK (20ULL * 1000 * 1000)
 
 struct scx_enum_spec {
@@ -79,12 +73,6 @@ static int rewrite_rodata_u64(const struct btf *btf, void *rodata, size_t sz,
 static int populate_scx_rodata(struct bpf_object *obj)
 {
 	static const struct scx_enum_spec enum_specs[] = {
-		{ "__SCX_DSQ_LOCAL", "scx_dsq_id_flags", "SCX_DSQ_LOCAL",
-		  DSQ_LOCAL_FALLBACK },
-		{ "__SCX_DSQ_LOCAL_ON", "scx_dsq_id_flags", "SCX_DSQ_LOCAL_ON",
-		  DSQ_LOCAL_ON_BASE_FALLBACK },
-		{ "__SCX_DSQ_LOCAL_CPU_MASK", "scx_dsq_id_flags",
-		  "SCX_DSQ_LOCAL_CPU_MASK", DSQ_LOCAL_CPU_MASK_FALLBACK },
 		{ "__SCX_SLICE_DFL", "scx_public_consts", "SCX_SLICE_DFL",
 		  SCX_SLICE_DFL_FALLBACK },
 	};
