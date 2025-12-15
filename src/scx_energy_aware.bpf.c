@@ -91,6 +91,8 @@ static __u64 last_printed_ts;
 static __u32 dsq_nr_cpus;
 static bool local_dsq_created;
 
+#define MAX_COLD_DSQ_DEPTH 4
+
 struct dsq_loop_ctx {
 	__u32 nr_cpus;
 	s32 err;
@@ -213,9 +215,12 @@ static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, _
 struct pick_ctx {
 	struct task_struct *p;
 	__u32 nr_cpus;
-	bool found_warm;
-	s32 best_cpu;
-	__u32 best_depth;
+	bool has_cold;
+	bool has_warm;
+	s32 best_cold_cpu;
+	__u32 best_cold_depth;
+	s32 best_warm_cpu;
+	__u32 best_warm_depth;
 };
 
 static long pick_cold_cb(u64 idx, void *data)
@@ -235,18 +240,28 @@ static long pick_cold_cb(u64 idx, void *data)
 	state = read_core_state(cpu);
 
 	if (state == CORE_COLD) {
+		ctx->has_cold = true;
 		dsq_depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(cpu));
 		depth = dsq_depth < 0 ? (__u32)-1 : (__u32)dsq_depth;
 
-		if (depth < ctx->best_depth) {
-			ctx->best_depth = depth;
-			ctx->best_cpu = cpu;
+		if (depth < ctx->best_cold_depth) {
+			ctx->best_cold_depth = depth;
+			ctx->best_cold_cpu = cpu;
 		}
 		return 0;
 	}
 
-	if (state != CORE_HOT)
-		ctx->found_warm = true;
+	if (state == CORE_WARM) {
+		ctx->has_warm = true;
+		dsq_depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(cpu));
+		depth = dsq_depth < 0 ? (__u32)-1 : (__u32)dsq_depth;
+
+		if (depth < ctx->best_warm_depth) {
+			ctx->best_warm_depth = depth;
+			ctx->best_warm_cpu = cpu;
+		}
+		return 0;
+	}
 
 	return 0;
 }
@@ -257,9 +272,12 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 	struct pick_ctx ctx = {
 		.p = p,
 		.nr_cpus = nr_cpus,
-		.found_warm = false,
-		.best_cpu = -1,
-		.best_depth = (__u32)-1,
+		.has_cold = false,
+		.has_warm = false,
+		.best_cold_cpu = -1,
+		.best_cold_depth = (__u32)-1,
+		.best_warm_cpu = -1,
+		.best_warm_depth = (__u32)-1,
 	};
 	long ret;
 
@@ -267,8 +285,14 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 	if (ret < 0)
 		return -1;
 
-	*found_warm = ctx.found_warm;
-	return ctx.best_cpu;
+	if (ctx.best_cold_cpu >= 0 && ctx.best_cold_depth < MAX_COLD_DSQ_DEPTH)
+		return ctx.best_cold_cpu;
+
+	if (ctx.best_warm_cpu >= 0)
+		return ctx.best_warm_cpu;
+
+	*found_warm = ctx.has_warm;
+	return -1;
 }
 
 struct steer_ctx {
