@@ -117,14 +117,14 @@ static int discover_core_sensors(const struct topo *topo,
 		char hwmon_name[64] = {};
 		bool is_coretemp = false;
 		size_t pkg_base_gid = 0;
-		size_t pkg_max_gid = 0;
+		size_t pkg_next_gid = 0;
 		bool pkg_has_core = false;
 
 		if (!load_hwmon_name(hwmon_dir, hwmon_name, sizeof(hwmon_name)) &&
 		    strcmp(hwmon_name, "coretemp") == 0) {
 			is_coretemp = true;
 			pkg_base_gid = next_core_gid;
-			pkg_max_gid = pkg_base_gid;
+			pkg_next_gid = pkg_base_gid;
 		}
 
 		while ((entry = readdir(sensor_dir)) != NULL) {
@@ -162,20 +162,18 @@ static int discover_core_sensors(const struct topo *topo,
 			__u32 target_gid = TOPO_GID_INVALID;
 
 			if (is_coretemp) {
-				target_gid = pkg_base_gid + core_idx;
-				if (target_gid >= topo->nr_cores ||
-				    target_gid >= MAX_CORE_TEMPS)
+				if (pkg_next_gid >= topo->nr_cores ||
+				    pkg_next_gid >= MAX_CORE_TEMPS)
 					continue;
 
 				const struct topo_core *core =
-					topo_core_by_gid(topo, target_gid);
+					topo_core_by_gid(topo, pkg_next_gid);
 				if (!core)
 					continue;
 
 				target_cpu = core->primary_cpu;
 				pkg_has_core = true;
-				if (target_gid + 1 > pkg_max_gid)
-					pkg_max_gid = target_gid + 1;
+				target_gid = pkg_next_gid++;
 			} else {
 				if (core_idx >= TOPO_MAX_CPUS)
 					continue;
@@ -215,8 +213,8 @@ static int discover_core_sensors(const struct topo *topo,
 
 		closedir(sensor_dir);
 
-		if (is_coretemp && pkg_has_core && pkg_max_gid > next_core_gid)
-			next_core_gid = pkg_max_gid;
+		if (is_coretemp && pkg_has_core)
+			next_core_gid = pkg_next_gid;
 	}
 
 	closedir(root);
