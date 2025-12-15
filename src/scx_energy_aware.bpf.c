@@ -465,10 +465,15 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 	if (tctx)
 		cpu = tctx->target_cpu;
 
-	if (cpu >= 0 && (__u32)cpu < nr_cpus)
+	if (cpu >= 0 && (__u32)cpu < dsq_nr_cpus)
 		dsq_id = cpu_dsq_id(cpu);
+	else
+		cpu = -1;
 
 	scx_bpf_dsq_insert(p, dsq_id, SCX_SLICE_DFL, enq_flags);
+
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, 0);
 }
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
