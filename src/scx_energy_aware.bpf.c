@@ -387,7 +387,7 @@ static __always_inline void core_active_inc_gid(__u32 core_gid)
 	if (!cnt)
 		return;
 
-	__sync_fetch_and_add(cnt, 1);
+	*cnt += 1;
 }
 
 static __always_inline void core_active_dec_gid(__u32 core_gid)
@@ -402,7 +402,7 @@ static __always_inline void core_active_dec_gid(__u32 core_gid)
 		return;
 
 	if (*cnt > 0)
-		__sync_fetch_and_sub(cnt, 1);
+		*cnt -= 1;
 }
 
 static __always_inline void core_active_inc_cpu(__u32 cpu)
