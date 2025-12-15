@@ -93,6 +93,13 @@ struct {
 	__type(value, __u32);
 } core_active_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, ENERGY_AWARE_MAX_CPUS);
+	__type(key, __u32);
+	__type(value, __u32);
+} cpu_busy_map SEC(".maps");
+
 #define DEFAULT_MAX_COLD_DSQ_DEPTH 4
 #define DEFAULT_MAX_REUSE_DSQ_DEPTH 6
 #define DEFAULT_ENABLE_PINNING 1
@@ -412,6 +419,48 @@ static __always_inline void core_active_dec_cpu(__u32 cpu)
 	core_active_dec_gid(gid);
 }
 
+static __always_inline bool cpu_is_busy(__u32 cpu)
+{
+	__u32 *busy;
+
+	if (cpu >= ENERGY_AWARE_MAX_CPUS)
+		return true;
+
+	busy = bpf_map_lookup_elem(&cpu_busy_map, &cpu);
+	if (!busy)
+		return true;
+
+	return *busy != 0;
+}
+
+static __always_inline void cpu_mark_busy(__u32 cpu)
+{
+	__u32 *busy;
+
+	if (cpu >= ENERGY_AWARE_MAX_CPUS)
+		return;
+
+	busy = bpf_map_lookup_elem(&cpu_busy_map, &cpu);
+	if (!busy)
+		return;
+
+	*busy = 1;
+}
+
+static __always_inline void cpu_mark_idle(__u32 cpu)
+{
+	__u32 *busy;
+
+	if (cpu >= ENERGY_AWARE_MAX_CPUS)
+		return;
+
+	busy = bpf_map_lookup_elem(&cpu_busy_map, &cpu);
+	if (!busy)
+		return;
+
+	*busy = 0;
+}
+
 static __always_inline bool task_allows_cpu(struct task_struct *p, s32 cpu, __u32 nr_cpus)
 {
 	if (cpu < 0)
@@ -469,6 +518,9 @@ static long pick_cold_cb(u64 idx, void *data)
 
 	if ((__u32)cpu >= ctx->nr_cpus)
 		return 1;
+
+	if (cpu_is_busy(cpu))
+		return 0;
 
 	if (!task_allows_cpu(ctx->p, cpu, ctx->nr_cpus))
 		return 0;
@@ -635,6 +687,49 @@ static __always_inline void pin_to_cpu(struct task_struct *p, s32 cpu)
 		scx_bpf_cpu_can_run(p, i, i == cpu);
 }
 
+static __always_inline bool cpu_matches_core(const struct core_siblings *core,
+					     __u32 cpu)
+{
+	if (!core)
+		return false;
+
+#pragma clang loop unroll(disable)
+	for (__u32 idx = 0; idx < TOPO_MAX_SIBLINGS; idx++) {
+		if (idx >= core->siblings.sib_cnt)
+			break;
+		if (core->siblings.sibs[idx] == cpu)
+			return true;
+	}
+
+	return false;
+}
+
+static __always_inline void pin_to_core(struct task_struct *p, __u32 cpu)
+{
+	if (is_kernelish(p))
+		return;
+
+	if (!bpf_ksym_exists(scx_bpf_cpu_can_run))
+		return;
+
+	__u32 core_gid = get_core_gid_from_cpu(cpu);
+	const struct core_siblings *core =
+		bpf_map_lookup_elem(&core_siblings_map, &core_gid);
+	__u32 nr = clamp_nr_cpus_real();
+
+#pragma clang loop unroll(disable)
+	for (s32 i = 0; i < (s32)nr; i++) {
+		bool allow = false;
+
+		if (core && core->siblings.sib_cnt > 0)
+			allow = cpu_matches_core(core, (__u32)i);
+		else
+			allow = (i == (s32)cpu);
+
+		scx_bpf_cpu_can_run(p, i, allow);
+	}
+}
+
 static __always_inline void init_task_ctx(struct task_ctx *tctx)
 {
 	if (!tctx)
@@ -690,7 +785,7 @@ static __always_inline void ensure_pinned_to(struct task_struct *p,
 	if (tctx->pinned_cpu == cpu && now < tctx->pin_until_ts)
 		return;
 
-	pin_to_cpu(p, cpu);
+	pin_to_core(p, cpu);
 	lease = cfg_pinning_lease_ns(cfg);
 	tctx->pinned_cpu = cpu;
 	tctx->pin_until_ts = now + lease;
@@ -869,6 +964,8 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
+	cpu_mark_idle((__u32)cpu);
+
 	if (prev && !is_kernelish(prev))
 		core_active_dec_cpu((__u32)cpu);
 
@@ -896,6 +993,7 @@ void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
 		tctx->last_cpu = (s32)cpu;
 	}
 
+	cpu_mark_busy(cpu);
 	core_active_inc_cpu(cpu);
 }
 
