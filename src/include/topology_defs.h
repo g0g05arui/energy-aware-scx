@@ -1,7 +1,11 @@
 #ifndef TOPOLOGY_DEFS_H
 #define TOPOLOGY_DEFS_H
 
+#include <stdint.h>
+
+#ifndef __BPF__
 #include <linux/types.h>
+#endif
 
 #include "rapl_stats.h"
 
