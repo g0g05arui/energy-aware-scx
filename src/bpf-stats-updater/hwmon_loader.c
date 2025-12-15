@@ -82,6 +82,8 @@ static int discover_core_sensors(const struct topo *topo,
 	struct dirent *hwde;
 	size_t count = 0;
 	const char *hwmon_root = "/sys/class/hwmon";
+	bool seen[MAX_CORE_TEMPS] = {};
+	size_t next_core_gid = 0;
 
 	if (!topo)
 		return -EINVAL;
@@ -113,8 +115,17 @@ static int discover_core_sensors(const struct topo *topo,
 			continue;
 
 		char hwmon_name[64] = {};
-		if (load_hwmon_name(hwmon_dir, hwmon_name, sizeof(hwmon_name)))
-			hwmon_name[0] = '\0';
+		bool is_coretemp = false;
+		size_t pkg_base_gid = 0;
+		size_t pkg_max_gid = 0;
+		bool pkg_has_core = false;
+
+		if (!load_hwmon_name(hwmon_dir, hwmon_name, sizeof(hwmon_name)) &&
+		    strcmp(hwmon_name, "coretemp") == 0) {
+			is_coretemp = true;
+			pkg_base_gid = next_core_gid;
+			pkg_max_gid = pkg_base_gid;
+		}
 
 		while ((entry = readdir(sensor_dir)) != NULL) {
 			int temp_id;
@@ -146,18 +157,46 @@ static int discover_core_sensors(const struct topo *topo,
 
 			if (!parse_core_label(label, &core_idx))
 				continue;
-			if (core_idx >= TOPO_MAX_CPUS)
-				continue;
-			if (!topo_cpu_allowed(topo, core_idx))
+
+			__u32 target_cpu = core_idx;
+			__u32 target_gid = TOPO_GID_INVALID;
+
+			if (is_coretemp) {
+				target_gid = pkg_base_gid + core_idx;
+				if (target_gid >= topo->nr_cores ||
+				    target_gid >= MAX_CORE_TEMPS)
+					continue;
+
+				const struct topo_core *core =
+					topo_core_by_gid(topo, target_gid);
+				if (!core)
+					continue;
+
+				target_cpu = core->primary_cpu;
+				pkg_has_core = true;
+				if (target_gid + 1 > pkg_max_gid)
+					pkg_max_gid = target_gid + 1;
+			} else {
+				if (core_idx >= TOPO_MAX_CPUS)
+					continue;
+				if (!topo_cpu_allowed(topo, target_cpu))
+					continue;
+				target_gid = topo_core_gid_for_cpu(topo, target_cpu);
+				if (target_gid == TOPO_GID_INVALID ||
+				    target_gid >= MAX_CORE_TEMPS)
+					continue;
+			}
+
+			if (seen[target_gid])
 				continue;
 			if (count >= max_sensors) {
 				fprintf(stderr,
-					"WARNING: too many core sensors, ignoring core %u\n",
-					core_idx);
+					"WARNING: too many core sensors, ignoring core gid %u\n",
+					target_gid);
 				continue;
 			}
 
-			sensors[count].cpu_id = core_idx;
+			sensors[count].cpu_id = target_cpu;
 			if (snprintf(sensors[count].input_path,
 				     sizeof(sensors[count].input_path),
 				     "%s/temp%d_input", hwmon_dir, temp_id) >=
@@ -167,12 +206,17 @@ static int discover_core_sensors(const struct topo *topo,
 					hwde->d_name, temp_id);
 				continue;
 			}
-			printf("Mapped %s temp%d (%s) -> cpu %u\n", hwde->d_name,
-			       temp_id, label, sensors[count].cpu_id);
+			printf("Mapped %s temp%d (%s) -> cpu %u (core gid %u)\n",
+			       hwde->d_name, temp_id, label, sensors[count].cpu_id,
+			       target_gid);
+			seen[target_gid] = true;
 			count++;
 		}
 
 		closedir(sensor_dir);
+
+		if (is_coretemp && pkg_has_core && pkg_max_gid > next_core_gid)
+			next_core_gid = pkg_max_gid;
 	}
 
 	closedir(root);
