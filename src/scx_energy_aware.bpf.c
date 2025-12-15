@@ -23,9 +23,11 @@ static __always_inline __u64 cpu_dsq_id(s32 cpu)
 
 extern bool scx_bpf_cpu_can_run(struct task_struct *p, s32 cpu, bool allowed) __ksym __weak;
 
-static __always_inline bool is_kernel_thread(struct task_struct *p)
+/* Treat kernel threads as "EEVDF/default policy" */
+static __always_inline bool is_kernelish(struct task_struct *p)
 {
-	return (p->flags & PF_KTHREAD) != 0;
+	/* PF_KTHREAD covers kworker/*, and mm==NULL is an extra safety net */
+	return (p->flags & PF_KTHREAD) || !p->mm;
 }
 
 struct {
@@ -151,16 +153,17 @@ static __always_inline void log_sched_decision(struct task_struct *p, s32 prev_c
 			   p->pid, p->comm, prev_cpu, next_cpu);
 }
 
-/* Policy CPU cap */
+/* Scheduler policy CPU cap (performance knob) */
 static __u32 clamp_nr_cpus(void)
 {
 	__u32 nr = scx_bpf_nr_cpu_ids();
+
 	if (nr > ENERGY_AWARE_MAX_CPUS)
 		return ENERGY_AWARE_MAX_CPUS;
 	return nr;
 }
 
-/* Real CPU count for cpu_can_run masks */
+/* Real cpu count (for cpu_can_run masks, DSQ creation bounds, etc.) */
 static __always_inline __u32 clamp_nr_cpus_real(void)
 {
 	__u32 nr = scx_bpf_nr_cpu_ids();
@@ -306,10 +309,10 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 	bpf_loop(ENERGY_AWARE_MAX_CPUS, steer_cb, &ctx, 0);
 }
 
-/* IMPORTANT: Do not touch kernel threads */
+/* cpu_can_run masks must cover the real cpu range - BUT NEVER TOUCH KTHREADS */
 static __always_inline void allow_all_cpus(struct task_struct *p)
 {
-	if (is_kernel_thread(p))
+	if (is_kernelish(p))
 		return;
 
 	if (!bpf_ksym_exists(scx_bpf_cpu_can_run))
@@ -324,7 +327,7 @@ static __always_inline void allow_all_cpus(struct task_struct *p)
 
 static __always_inline void pin_to_cpu(struct task_struct *p, s32 cpu)
 {
-	if (is_kernel_thread(p))
+	if (is_kernelish(p))
 		return;
 
 	if (!bpf_ksym_exists(scx_bpf_cpu_can_run))
@@ -355,8 +358,8 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 
 	(void)wake_flags;
 
-	/* Kernel threads: never pin / steer, just let default decide */
-	if (is_kernel_thread(p)) {
+	/* Kernel threads: always default policy (EEVDF/CFS select) and no pinning */
+	if (is_kernelish(p)) {
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
 		log_sched_decision(p, prev_cpu, cpu);
 		return cpu;
@@ -418,8 +421,8 @@ log_return:
 
 void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	/* Kernel threads: never route to per-CPU DSQs */
-	if (is_kernel_thread(p)) {
+	/* Kernel threads: keep default behavior, avoid per-CPU DSQs */
+	if (is_kernelish(p)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
 		return;
 	}
@@ -445,6 +448,7 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
+	/* Drain per-CPU DSQ for user tasks */
 	if ((__u32)cpu < dsq_nr_cpus)
 		scx_bpf_dsq_move_to_local(cpu_dsq_id(cpu));
 
@@ -454,6 +458,10 @@ void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
 {
+	/* Track last_cpu only for user tasks */
+	if (is_kernelish(p))
+		return;
+
 	struct task_ctx *tctx;
 
 	tctx = bpf_task_storage_get(&task_ctx_map, p, 0,
