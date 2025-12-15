@@ -12,7 +12,7 @@ char _license[] SEC("license") = "GPL";
 #else
 #define ENERGY_AWARE_MAX_CPUS 32
 #endif
-#endif 
+#endif
 
 extern bool scx_bpf_cpu_can_run(struct task_struct *p, s32 cpu, bool allowed) __ksym __weak;
 
@@ -58,6 +58,7 @@ struct {
 
 struct task_ctx {
 	s32 target_cpu;
+	s32 last_cpu;
 };
 
 struct {
@@ -102,10 +103,10 @@ static __always_inline void log_sched_decision(struct task_struct *p, s32 prev_c
 	if (!sched_log_should_emit(now))
 		return;
 
-	//add debugging flag from makefile
-	if(prev_cpu != next_cpu)
+	// add debugging flag from makefile
+	if (prev_cpu != next_cpu)
 		bpf_printk("SCX sched pid=%d comm=%s prev=%d next=%d",
-		   p->pid, p->comm, prev_cpu, next_cpu);
+			   p->pid, p->comm, prev_cpu, next_cpu);
 }
 
 static __u32 clamp_nr_cpus(void)
@@ -117,7 +118,7 @@ static __u32 clamp_nr_cpus(void)
 	return nr;
 }
 
-static  enum core_status read_core_state(__u32 cpu)
+static enum core_status read_core_state(__u32 cpu)
 {
 	__u32 key = cpu;
 	enum core_status *state;
@@ -262,7 +263,7 @@ static __always_inline s32 select_cpu_default(struct task_struct *p, s32 prev_cp
 	return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 }
 
-static  __u32 read_temp(__u32 idx, bool *valid)
+static __u32 read_temp(__u32 idx, bool *valid)
 {
 	__u32 *temp = bpf_map_lookup_elem(&core_temp_map, &idx);
 	if (temp) {
@@ -276,7 +277,7 @@ static  __u32 read_temp(__u32 idx, bool *valid)
 	return 0;
 }
 
-static  __u32 read_temp_count(__u32 stats_core_count)
+static __u32 read_temp_count(__u32 stats_core_count)
 {
 	__u32 key = 0;
 	__u32 *count = bpf_map_lookup_elem(&core_temp_count_map, &key);
@@ -332,7 +333,14 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	bool found_warm = false;
 	s32 cpu;
 
+	struct task_ctx *tctx;
+	s32 last_cpu = -1;
+
 	(void)wake_flags;
+
+	tctx = bpf_task_storage_get(&task_ctx_map, p, 0, 0);
+	if (tctx)
+		last_cpu = tctx->last_cpu;
 
 	if (!nr_cpus) {
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
@@ -340,7 +348,14 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 		goto log_return;
 	}
 
-	/* Prefer to keep the task on its previous CPU if it isn't hot. */
+	/* Prefer the CPU the task actually last ran on (real cache locality). */
+	if (last_cpu >= 0) {
+		cpu = reuse_prev_cpu(p, last_cpu, nr_cpus);
+		if (cpu >= 0)
+			goto log_return;
+	}
+
+	/* Fallback: try prev_cpu too (can be waker CPU / not true locality). */
 	cpu = reuse_prev_cpu(p, prev_cpu, nr_cpus);
 	if (cpu >= 0)
 		goto log_return;
@@ -370,12 +385,12 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 
 log_return:
 	{
-		struct task_ctx *tctx;
+		struct task_ctx *tctx2;
 
-		tctx = bpf_task_storage_get(&task_ctx_map, p, 0,
-					    BPF_LOCAL_STORAGE_GET_F_CREATE);
-		if (tctx)
-			tctx->target_cpu = cpu;
+		tctx2 = bpf_task_storage_get(&task_ctx_map, p, 0,
+					     BPF_LOCAL_STORAGE_GET_F_CREATE);
+		if (tctx2)
+			tctx2->target_cpu = cpu;
 	}
 	log_sched_decision(p, prev_cpu, cpu);
 	return cpu;
@@ -392,9 +407,9 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/* Placement-only: dispatch immediately with default slice */
 	if (cpu >= 0)
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
 	else
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 }
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
@@ -402,16 +417,24 @@ void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 	scx_bpf_dsq_move_to_local(SCX_DSQ_LOCAL_ON | cpu);
 }
 
-void BPF_STRUCT_OPS(rr_running, struct task_struct *p){}
+void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
+{
+	struct task_ctx *tctx;
 
-void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable){}
+	tctx = bpf_task_storage_get(&task_ctx_map, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (tctx)
+		tctx->last_cpu = (s32)bpf_get_smp_processor_id();
+}
+
+void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable) {}
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 {
 	return 0;
 }
 
-void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei){}
+void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei) {}
 
 SEC(".struct_ops.link")
 struct sched_ext_ops energy_aware_ops = {
