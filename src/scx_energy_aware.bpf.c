@@ -6,11 +6,6 @@
 
 char _license[] SEC("license") = "GPL";
 
-/* Dedicated fallback DSQ for kernel threads / default-ish path.
- * Must be non-zero because your kernel treats DSQ 0 as invalid.
- */
-#define FALLBACK_DSQ_ID 1ULL
-
 #define ENERGY_AWARE_DSQ_BASE (1ULL << 32)
 
 static __always_inline __u64 cpu_dsq_id(s32 cpu)
@@ -89,7 +84,6 @@ struct {
 static __u64 last_printed_ts;
 #define SCHED_DECISION_LOG_INTERVAL_NS (100ULL * 1000 * 1000)
 static __u32 dsq_nr_cpus;
-static bool local_dsq_created;
 
 #define MAX_COLD_DSQ_DEPTH 4
 
@@ -444,9 +438,9 @@ log_return:
 
 void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	/* Kernel threads: enqueue into our explicit fallback DSQ (non-zero) */
+	/* Kernel threads: enqueue into built-in local DSQ (always valid) */
 	if (is_kernelish(p)) {
-		scx_bpf_dsq_insert(p, FALLBACK_DSQ_ID, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 		return;
 	}
 
@@ -471,8 +465,8 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
-	/* Always drain fallback DSQ first (kernel threads / default-ish tasks) */
-	scx_bpf_dsq_move_to_local(FALLBACK_DSQ_ID);
+	/* Always drain built-in local DSQ first (kernel threads / fallback) */
+	scx_bpf_dsq_move_to_local(SCX_DSQ_LOCAL);
 
 	/* Then drain this CPU's per-CPU DSQ (user tasks) */
 	if ((__u32)cpu < dsq_nr_cpus)
@@ -497,7 +491,6 @@ void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable) {}
 s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 {
 	__u32 nr_cpus = scx_bpf_nr_cpu_ids();
-	s32 err;
 	struct dsq_loop_ctx loop_ctx = {
 		.nr_cpus = nr_cpus,
 		.err = 0,
@@ -506,23 +499,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 	if (nr_cpus > NR_CPUS)
 		nr_cpus = NR_CPUS;
 
-	err = scx_bpf_create_dsq(SCX_DSQ_LOCAL, -1);
-	if (err)
-		return err;
-	local_dsq_created = true;
-
 	loop_ctx.nr_cpus = nr_cpus;
 	bpf_loop(nr_cpus, dsq_create_cb, &loop_ctx, 0);
 	if (loop_ctx.err)
-		goto destroy_local;
+		return loop_ctx.err;
 
 	dsq_nr_cpus = nr_cpus;
 	return 0;
-
-destroy_local:
-	scx_bpf_destroy_dsq(SCX_DSQ_LOCAL);
-	local_dsq_created = false;
-	return loop_ctx.err;
 }
 
 void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei)
@@ -532,15 +515,10 @@ void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei)
 		.err = 0,
 	};
 
-	if (dsq_nr_cpus)
-		bpf_loop(dsq_nr_cpus, dsq_destroy_cb, &loop_ctx, 0);
+	if (!dsq_nr_cpus)
+		return;
 
 	bpf_loop(dsq_nr_cpus, dsq_destroy_cb, &loop_ctx, 0);
-
-	if (local_dsq_created) {
-		scx_bpf_destroy_dsq(SCX_DSQ_LOCAL);
-		local_dsq_created = false;
-	}
 }
 
 SEC(".struct_ops.link")
