@@ -239,9 +239,6 @@ static void update_core_temp_map(int temps_map_fd, int state_map_fd,
 {
 	__u32 temps[MAX_CORE_TEMPS] = {};
 	bool has_value[MAX_CORE_TEMPS] = {};
-	unsigned long long total_temp = 0;
-	unsigned int nonzero_count = 0;
-	__u32 avg_temp = 0;
 
 	if (slot_count > MAX_CORE_TEMPS)
 		slot_count = MAX_CORE_TEMPS;
@@ -282,21 +279,11 @@ static void update_core_temp_map(int temps_map_fd, int state_map_fd,
 
 		temps[idx] = (__u32)val;
 		has_value[idx] = true;
-		if (temps[idx] > 0) {
-			total_temp += temps[idx];
-			nonzero_count++;
-		}
 	}
-
-	if (nonzero_count > 0)
-		avg_temp = total_temp / nonzero_count;
 
 	for (__u32 idx = 0; idx < slot_count; idx++) {
 		__u32 temp = has_value[idx] ? temps[idx] : 0;
 		enum core_status state;
-
-		if (temp == 0 && avg_temp > 0)
-			temp = avg_temp; /* fill missing temps with the average */
 
 		state = determine_core_state(state_map_fd, idx, temp);
 
