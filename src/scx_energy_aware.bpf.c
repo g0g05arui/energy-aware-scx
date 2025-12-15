@@ -4,6 +4,11 @@
 #include "rapl_stats.h"
 #include "core_state.h"
 
+/*
+ * DSQ routing remains the primary steering mechanism.
+ * cpu_can_run pinning is optional, short-lived, and kept minimal to avoid thrash.
+ */
+
 char _license[] SEC("license") = "GPL";
 
 #define ENERGY_AWARE_DSQ_BASE (1ULL << 32)
@@ -59,6 +64,29 @@ struct {
 	__type(value, enum core_status);
 } core_state_map SEC(".maps");
 
+#define DEFAULT_MAX_COLD_DSQ_DEPTH 4
+#define DEFAULT_MAX_REUSE_DSQ_DEPTH 6
+#define DEFAULT_ENABLE_PINNING 1
+#define DEFAULT_ENABLE_LOGGING 1
+#define DEFAULT_LOG_INTERVAL_NS (100ULL * 1000 * 1000)
+#define DEFAULT_PINNING_LEASE_NS (2ULL * 1000 * 1000)
+
+struct sched_cfg {
+	__u32 max_cold_dsq_depth;
+	__u32 max_reuse_dsq_depth;
+	__u32 enable_pinning;
+	__u32 enable_logging;
+	__u32 log_interval_ns;
+	__u32 pinning_lease_ns;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct sched_cfg);
+} sched_cfg_map SEC(".maps");
+
 struct sched_log_state {
 	struct bpf_spin_lock lock;
 	__u64 last_ts;
@@ -74,6 +102,8 @@ struct {
 struct task_ctx {
 	s32 target_cpu;
 	s32 last_cpu;
+	s32 pinned_cpu;
+	__u64 pin_until_ts;
 };
 
 struct {
@@ -83,13 +113,57 @@ struct {
 	__type(value, struct task_ctx);
 } task_ctx_map SEC(".maps");
 
-static __u64 last_printed_ts;
-#define SCHED_DECISION_LOG_INTERVAL_NS (100ULL * 1000 * 1000)
+static __always_inline const struct sched_cfg *get_cfg(void)
+{
+	__u32 key = 0;
+
+	return bpf_map_lookup_elem(&sched_cfg_map, &key);
+}
+
+static __always_inline __u32 cfg_max_cold_depth(const struct sched_cfg *cfg)
+{
+	if (cfg)
+		return cfg->max_cold_dsq_depth;
+	return DEFAULT_MAX_COLD_DSQ_DEPTH;
+}
+
+static __always_inline __u32 cfg_max_reuse_depth(const struct sched_cfg *cfg)
+{
+	if (cfg)
+		return cfg->max_reuse_dsq_depth;
+	return DEFAULT_MAX_REUSE_DSQ_DEPTH;
+}
+
+static __always_inline bool cfg_pinning_enabled(const struct sched_cfg *cfg)
+{
+	if (cfg)
+		return cfg->enable_pinning;
+	return DEFAULT_ENABLE_PINNING;
+}
+
+static __always_inline bool cfg_logging_enabled(const struct sched_cfg *cfg)
+{
+	if (cfg)
+		return cfg->enable_logging;
+	return DEFAULT_ENABLE_LOGGING;
+}
+
+static __always_inline __u64 cfg_log_interval_ns(const struct sched_cfg *cfg)
+{
+	if (cfg)
+		return cfg->log_interval_ns;
+	return DEFAULT_LOG_INTERVAL_NS;
+}
+
+static __always_inline __u64 cfg_pinning_lease_ns(const struct sched_cfg *cfg)
+{
+	if (cfg)
+		return cfg->pinning_lease_ns;
+	return DEFAULT_PINNING_LEASE_NS;
+}
+
 static __u32 dsq_nr_cpus;
 static bool fallback_dsq_created;
-
-#define MAX_COLD_DSQ_DEPTH 4
-#define MAX_REUSE_DSQ_DEPTH 6
 
 struct dsq_loop_ctx {
 	__u32 nr_cpus;
@@ -121,18 +195,23 @@ static long dsq_destroy_cb(u64 idx, void *data)
 	return 0;
 }
 
-static __always_inline bool sched_log_should_emit(__u64 now)
+static __always_inline bool sched_log_should_emit(__u64 now,
+						  const struct sched_cfg *cfg)
 {
 	struct sched_log_state *state;
 	__u32 key = 0;
 	bool should_log = false;
+	__u64 interval = cfg_log_interval_ns(cfg);
+
+	if (!cfg_logging_enabled(cfg))
+		return false;
 
 	state = bpf_map_lookup_elem(&sched_log_state_map, &key);
 	if (!state)
 		return false;
 
 	bpf_spin_lock(&state->lock);
-	if (now - state->last_ts >= SCHED_DECISION_LOG_INTERVAL_NS) {
+	if (now - state->last_ts >= interval) {
 		state->last_ts = now;
 		should_log = true;
 	}
@@ -142,15 +221,19 @@ static __always_inline bool sched_log_should_emit(__u64 now)
 }
 
 static __always_inline void log_sched_decision(struct task_struct *p, s32 prev_cpu,
-					       s32 next_cpu)
+					       s32 next_cpu,
+					       const struct sched_cfg *cfg)
 {
 	__u64 now;
 
 	if (next_cpu < 0)
 		return;
 
+	if (!cfg_logging_enabled(cfg))
+		return;
+
 	now = bpf_ktime_get_ns();
-	if (!sched_log_should_emit(now))
+	if (!sched_log_should_emit(now, cfg))
 		return;
 
 	if (prev_cpu != next_cpu)
@@ -196,7 +279,8 @@ static __always_inline bool task_allows_cpu(struct task_struct *p, s32 cpu, __u3
 	return bpf_cpumask_test_cpu(cpu, p->cpus_ptr);
 }
 
-static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, __u32 nr_cpus)
+static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu,
+					  __u32 nr_cpus, __u32 max_reuse_depth)
 {
 	enum core_status state;
 	s32 depth;
@@ -209,7 +293,9 @@ static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, _
 		return -1;
 
 	depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(prev_cpu));
-	if (depth >= 0 && depth > MAX_REUSE_DSQ_DEPTH)
+	if (depth < 0)
+		return -1;
+	if ((__u32)depth > max_reuse_depth)
 		return -1;
 
 	return prev_cpu;
@@ -245,7 +331,9 @@ static long pick_cold_cb(u64 idx, void *data)
 	if (state == CORE_COLD) {
 		ctx->has_cold = true;
 		dsq_depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(cpu));
-		depth = dsq_depth < 0 ? (__u32)-1 : (__u32)dsq_depth;
+		if (dsq_depth < 0)
+			return 0;
+		depth = (__u32)dsq_depth;
 
 		if (depth < ctx->best_cold_depth) {
 			ctx->best_cold_depth = depth;
@@ -257,7 +345,9 @@ static long pick_cold_cb(u64 idx, void *data)
 	if (state == CORE_WARM) {
 		ctx->has_warm = true;
 		dsq_depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(cpu));
-		depth = dsq_depth < 0 ? (__u32)-1 : (__u32)dsq_depth;
+		if (dsq_depth < 0)
+			return 0;
+		depth = (__u32)dsq_depth;
 
 		if (depth < ctx->best_warm_depth) {
 			ctx->best_warm_depth = depth;
@@ -270,6 +360,9 @@ static long pick_cold_cb(u64 idx, void *data)
 }
 
 static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
+					 bool reuse_last_failed,
+					 bool reuse_prev_failed,
+					 const struct sched_cfg *cfg,
 					 bool *found_warm)
 {
 	struct pick_ctx ctx = {
@@ -284,11 +377,18 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 	};
 	long ret;
 
+	if (found_warm)
+		*found_warm = false;
+
+	if (!nr_cpus || !reuse_last_failed || !reuse_prev_failed)
+		return -1;
+
 	ret = bpf_loop(ENERGY_AWARE_MAX_CPUS, pick_cold_cb, &ctx, 0);
 	if (ret < 0)
 		return -1;
 
-	if (ctx.best_cold_cpu >= 0 && ctx.best_cold_depth < MAX_COLD_DSQ_DEPTH)
+	if (ctx.best_cold_cpu >= 0 &&
+	    ctx.best_cold_depth < cfg_max_cold_depth(cfg))
 		return ctx.best_cold_cpu;
 
 	if (ctx.best_warm_cpu >= 0)
@@ -368,6 +468,67 @@ static __always_inline void pin_to_cpu(struct task_struct *p, s32 cpu)
 		scx_bpf_cpu_can_run(p, i, i == cpu);
 }
 
+static __always_inline void init_task_ctx(struct task_ctx *tctx)
+{
+	if (!tctx)
+		return;
+
+	if (tctx->pin_until_ts == 0 && tctx->pinned_cpu == 0)
+		tctx->pinned_cpu = -1;
+}
+
+static __always_inline void ensure_allow_all(struct task_struct *p,
+					     struct task_ctx *tctx)
+{
+	if (!tctx) {
+		allow_all_cpus(p);
+		return;
+	}
+
+	if (tctx->pinned_cpu == -1)
+		return;
+
+	if (!bpf_ksym_exists(scx_bpf_cpu_can_run)) {
+		tctx->pinned_cpu = -1;
+		tctx->pin_until_ts = 0;
+		return;
+	}
+
+	allow_all_cpus(p);
+	tctx->pinned_cpu = -1;
+	tctx->pin_until_ts = 0;
+}
+
+static __always_inline void ensure_pinned_to(struct task_struct *p,
+					     struct task_ctx *tctx,
+					     s32 cpu, __u64 now,
+					     const struct sched_cfg *cfg)
+{
+	__u64 lease;
+
+	if (!tctx)
+		return;
+
+	if (!cfg_pinning_enabled(cfg)) {
+		ensure_allow_all(p, tctx);
+		return;
+	}
+
+	if (!bpf_ksym_exists(scx_bpf_cpu_can_run)) {
+		tctx->pinned_cpu = -1;
+		tctx->pin_until_ts = 0;
+		return;
+	}
+
+	if (tctx->pinned_cpu == cpu && now < tctx->pin_until_ts)
+		return;
+
+	pin_to_cpu(p, cpu);
+	lease = cfg_pinning_lease_ns(cfg);
+	tctx->pinned_cpu = cpu;
+	tctx->pin_until_ts = now + lease;
+}
+
 static __always_inline s32 select_cpu_default(struct task_struct *p, s32 prev_cpu,
 					      u64 wake_flags)
 {
@@ -377,10 +538,12 @@ static __always_inline s32 select_cpu_default(struct task_struct *p, s32 prev_cp
 
 s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	const struct sched_cfg *cfg = get_cfg();
 	__u32 nr_cpus = clamp_nr_cpus();
 	bool found_warm = false;
-	s32 cpu;
-
+	bool reuse_last_failed = true;
+	bool reuse_prev_failed = true;
+	s32 cpu = -1;
 	struct task_ctx *tctx;
 	s32 last_cpu = -1;
 
@@ -389,59 +552,97 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	/* Kernel threads: default CPU selection, no pinning/steering */
 	if (is_kernelish(p)) {
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
-		log_sched_decision(p, prev_cpu, cpu);
+		log_sched_decision(p, prev_cpu, cpu, cfg);
 		return cpu;
 	}
 
-	tctx = bpf_task_storage_get(&task_ctx_map, p, 0, 0);
-	if (tctx)
+	tctx = bpf_task_storage_get(&task_ctx_map, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (tctx) {
+		init_task_ctx(tctx);
 		last_cpu = tctx->last_cpu;
+	}
 
 	if (!nr_cpus) {
-		allow_all_cpus(p);
+		ensure_allow_all(p, tctx);
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
-		goto log_return;
+		goto record_ctx;
 	}
 
 	if (last_cpu >= 0) {
-		cpu = reuse_prev_cpu(p, last_cpu, nr_cpus);
-		if (cpu >= 0)
-			goto log_return;
+		s32 reuse_cpu = reuse_prev_cpu(p, last_cpu, nr_cpus,
+					       cfg_max_reuse_depth(cfg));
+		if (reuse_cpu >= 0) {
+			cpu = reuse_cpu;
+			reuse_last_failed = false;
+			goto record_ctx;
+		}
 	}
 
-	cpu = reuse_prev_cpu(p, prev_cpu, nr_cpus);
-	if (cpu >= 0)
-		goto log_return;
+	{
+		s32 reuse_cpu = reuse_prev_cpu(p, prev_cpu, nr_cpus,
+					       cfg_max_reuse_depth(cfg));
+		if (reuse_cpu >= 0) {
+			cpu = reuse_cpu;
+			reuse_prev_failed = false;
+			goto record_ctx;
+		}
+	}
 
-	cpu = pick_cold_cpu(p, nr_cpus, &found_warm);
+	cpu = pick_cold_cpu(p, nr_cpus, reuse_last_failed, reuse_prev_failed,
+			    cfg, &found_warm);
 	if (cpu >= 0)
-		goto log_return;
+		goto record_ctx;
 
 	if (found_warm) {
 		steer_away_from_hot(p, nr_cpus);
+		if (tctx) {
+			tctx->pinned_cpu = -1;
+			tctx->pin_until_ts = 0;
+		}
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
-		goto log_return;
+		goto record_ctx;
 	}
 
-	allow_all_cpus(p);
+	ensure_allow_all(p, tctx);
 	cpu = select_cpu_default(p, prev_cpu, wake_flags);
 
-log_return:
-	{
-		struct task_ctx *tctx2;
+record_ctx:
+	if (tctx)
+		tctx->target_cpu = cpu;
 
-		tctx2 = bpf_task_storage_get(&task_ctx_map, p, 0,
-					     BPF_LOCAL_STORAGE_GET_F_CREATE);
-		if (tctx2)
-			tctx2->target_cpu = cpu;
+	if (tctx) {
+		bool should_pin = false;
+
+		if (cpu >= 0 && cfg_pinning_enabled(cfg)) {
+			enum core_status state = read_core_state(cpu);
+
+			if (state == CORE_COLD || state == CORE_WARM) {
+				s32 dsq_depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(cpu));
+
+				if (dsq_depth >= 0) {
+					if (state == CORE_COLD &&
+					    (__u32)dsq_depth < cfg_max_cold_depth(cfg))
+						should_pin = true;
+					else if (state == CORE_WARM &&
+						 (__u32)dsq_depth < cfg_max_reuse_depth(cfg))
+						should_pin = true;
+				}
+			}
+		}
+
+		if (should_pin) {
+			__u64 now = bpf_ktime_get_ns();
+
+			ensure_pinned_to(p, tctx, cpu, now, cfg);
+		} else {
+			ensure_allow_all(p, tctx);
+		}
+	} else if (cpu >= 0) {
+		allow_all_cpus(p);
 	}
 
-	if (cpu >= 0 && (read_core_state(cpu) == CORE_COLD || read_core_state(cpu) == CORE_WARM))
-		pin_to_cpu(p, cpu);
-	else
-		allow_all_cpus(p);
-
-	log_sched_decision(p, prev_cpu, cpu);
+	log_sched_decision(p, prev_cpu, cpu, cfg);
 	return cpu;
 }
 
@@ -492,8 +693,10 @@ void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
 
 	tctx = bpf_task_storage_get(&task_ctx_map, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (tctx)
+	if (tctx) {
+		init_task_ctx(tctx);
 		tctx->last_cpu = (s32)bpf_get_smp_processor_id();
+	}
 }
 
 void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable) {}
