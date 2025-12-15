@@ -422,21 +422,33 @@ log_return:
 void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
+	__u64 dsq_id = SCX_DSQ_LOCAL;
 	s32 cpu = -1;
+	__u32 nr_cpus = clamp_nr_cpus();
 
 	tctx = bpf_task_storage_get(&task_ctx_map, p, 0, 0);
 	if (tctx)
 		cpu = tctx->target_cpu;
 
-	if (cpu >= 0)
-		scx_bpf_dsq_insert(p, DSQ_BASE + cpu, SCX_SLICE_DFL, enq_flags);
-	else
-		scx_bpf_dsq_insert(p, DSQ_BASE + 0, SCX_SLICE_DFL, enq_flags);
+	if (cpu >= 0) {
+		if ((__u32)cpu < nr_cpus)
+			dsq_id = DSQ_BASE + cpu;
+		else
+			dsq_id = SCX_DSQ_LOCAL_ON | (__u64)cpu;
+	}
+
+	scx_bpf_dsq_insert(p, dsq_id, SCX_SLICE_DFL, enq_flags);
 }
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
-	scx_bpf_dsq_move_to_local(DSQ_BASE + cpu);
+	__u32 nr_cpus = clamp_nr_cpus();
+	__u64 dsq_id = SCX_DSQ_LOCAL;
+
+	if (cpu >= 0 && (__u32)cpu < nr_cpus)
+		dsq_id = DSQ_BASE + cpu;
+
+	scx_bpf_dsq_move_to_local(dsq_id);
 }
 
 void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
