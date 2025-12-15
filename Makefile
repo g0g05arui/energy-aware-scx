@@ -109,8 +109,8 @@ $(HWMON_LOADER): $(SRC_DIR)/hwmon_loader.c $(STATS_HEADERS) $(HWMON_BPF_OBJ) $(T
 	$(CC) $(CFLAGS) $(SRC_DIR)/hwmon_loader.c $(TOPO_OBJ) -o $(HWMON_LOADER) $(LDFLAGS)
 	@echo "HWMON stats loader built: $(HWMON_LOADER)"
 
-$(SCX_READER): $(SRC_DIR)/scx_reader.c $(STATS_HEADERS)
-	$(CC) $(CFLAGS) $(SRC_DIR)/scx_reader.c -o $(SCX_READER) $(LDFLAGS)
+$(SCX_READER): $(SRC_DIR)/scx_reader.c $(STATS_HEADERS) $(TOPO_OBJ)
+	$(CC) $(CFLAGS) $(SRC_DIR)/scx_reader.c $(TOPO_OBJ) -o $(SCX_READER) $(LDFLAGS)
 	@echo "SCX reader built: $(SCX_READER)"
 
 $(SCX_FIFO_BPF): src/scx_fifo.bpf.c
