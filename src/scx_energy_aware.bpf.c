@@ -330,20 +330,20 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 		goto log_return;
 	}
 
-	/* 1) Prefer to keep the task on its previous CPU if it isn't hot. */
+	/* Prefer to keep the task on its previous CPU if it isn't hot. */
 	cpu = reuse_prev_cpu(p, prev_cpu, nr_cpus);
 	if (cpu >= 0)
 		goto log_return;
 
-	/* 2) Search for the coldest permitted CPU with the shallowest DSQ. */
+	/* Search for the coldest permitted CPU with the shallowest DSQ. */
 	cpu = pick_cold_cpu(p, nr_cpus, &found_warm);
 	if (cpu >= 0)
 		goto log_return;
 
 	/*
-	 * 3) No cold CPUs remain. If we saw at least one warm candidate,
-	 *    exclude hot CPUs and ask the default selector (EEVDF / CFS)
-	 *    to choose among the remaining warm CPUs.
+	 * No cold CPUs remain. If we saw at least one warm candidate,
+	 * exclude hot CPUs and ask the default selector (EEVDF / CFS)
+	 * to choose among the remaining warm CPUs.
 	 */
 	if (found_warm) {
 		steer_away_from_hot(p, nr_cpus);
