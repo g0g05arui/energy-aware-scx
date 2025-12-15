@@ -3,6 +3,7 @@
 #include <bpf/bpf_helpers.h>
 #include "rapl_stats.h"
 #include "core_state.h"
+#include "topology_defs.h"
 
 /*
  * DSQ routing remains the primary steering mechanism.
@@ -64,12 +65,34 @@ struct {
 	__type(value, enum core_status);
 } core_state_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, TOPO_MAX_CPUS);
+	__type(key, __u32);
+	__type(value, __u32);
+} cpu_to_core_gid_map SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_CORE_TEMPS);
+	__type(key, __u32);
+	__type(value, __u32);
+} core_primary_cpu_map SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_CORE_TEMPS);
+	__type(key, __u32);
+	__type(value, struct core_siblings);
+} core_siblings_map SEC(".maps");
+
 #define DEFAULT_MAX_COLD_DSQ_DEPTH 4
 #define DEFAULT_MAX_REUSE_DSQ_DEPTH 6
 #define DEFAULT_ENABLE_PINNING 1
 #define DEFAULT_ENABLE_LOGGING 1
 #define DEFAULT_LOG_INTERVAL_NS (100ULL * 1000 * 1000)
 #define DEFAULT_PINNING_LEASE_NS (2ULL * 1000 * 1000)
+#define DEFAULT_PREFER_PRIMARY 1
 
 struct sched_cfg {
 	__u32 max_cold_dsq_depth;
@@ -78,6 +101,7 @@ struct sched_cfg {
 	__u32 enable_logging;
 	__u32 log_interval_ns;
 	__u32 pinning_lease_ns;
+	__u32 prefer_primary;
 };
 
 struct {
@@ -146,6 +170,13 @@ static __always_inline bool cfg_logging_enabled(const struct sched_cfg *cfg)
 	if (cfg)
 		return cfg->enable_logging;
 	return DEFAULT_ENABLE_LOGGING;
+}
+
+static __always_inline bool cfg_prefer_primary(const struct sched_cfg *cfg)
+{
+	if (cfg)
+		return cfg->prefer_primary;
+	return DEFAULT_PREFER_PRIMARY;
 }
 
 static __always_inline __u64 cfg_log_interval_ns(const struct sched_cfg *cfg)
@@ -257,9 +288,19 @@ static __always_inline __u32 clamp_nr_cpus_real(void)
 	return nr;
 }
 
-static enum core_status read_core_state(__u32 cpu)
+static __always_inline __u32 get_core_gid_from_cpu(__u32 cpu)
 {
 	__u32 key = cpu;
+	__u32 *gid = bpf_map_lookup_elem(&cpu_to_core_gid_map, &key);
+
+	if (!gid)
+		return TOPO_GID_INVALID;
+	return *gid;
+}
+
+static enum core_status read_core_state_gid(__u32 core_gid)
+{
+	__u32 key = core_gid;
 	enum core_status *state;
 
 	state = bpf_map_lookup_elem(&core_state_map, &key);
@@ -267,6 +308,30 @@ static enum core_status read_core_state(__u32 cpu)
 		return *state;
 
 	return CORE_WARM;
+}
+
+static enum core_status read_core_state_cpu(__u32 cpu)
+{
+	__u32 core_gid = get_core_gid_from_cpu(cpu);
+
+	if (core_gid == TOPO_GID_INVALID)
+		return CORE_WARM;
+	return read_core_state_gid(core_gid);
+}
+
+static __always_inline bool cpu_is_primary(__u32 cpu)
+{
+	__u32 core_gid = get_core_gid_from_cpu(cpu);
+	__u32 *primary;
+
+	if (core_gid == TOPO_GID_INVALID)
+		return true;
+
+	primary = bpf_map_lookup_elem(&core_primary_cpu_map, &core_gid);
+	if (!primary)
+		return true;
+
+	return *primary == cpu;
 }
 
 static __always_inline bool task_allows_cpu(struct task_struct *p, s32 cpu, __u32 nr_cpus)
@@ -288,7 +353,7 @@ static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu,
 	if (!task_allows_cpu(p, prev_cpu, nr_cpus))
 		return -1;
 
-	state = read_core_state(prev_cpu);
+	state = read_core_state_cpu(prev_cpu);
 	if (state != CORE_COLD && state != CORE_WARM)
 		return -1;
 
@@ -304,6 +369,7 @@ static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu,
 struct pick_ctx {
 	struct task_struct *p;
 	__u32 nr_cpus;
+	bool allow_siblings;
 	bool has_cold;
 	bool has_warm;
 	s32 best_cold_cpu;
@@ -326,7 +392,10 @@ static long pick_cold_cb(u64 idx, void *data)
 	if (!task_allows_cpu(ctx->p, cpu, ctx->nr_cpus))
 		return 0;
 
-	state = read_core_state(cpu);
+	if (!ctx->allow_siblings && !cpu_is_primary(cpu))
+		return 0;
+
+	state = read_core_state_cpu(cpu);
 
 	if (state == CORE_COLD) {
 		ctx->has_cold = true;
@@ -360,14 +429,13 @@ static long pick_cold_cb(u64 idx, void *data)
 }
 
 static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
-					 bool reuse_last_failed,
-					 bool reuse_prev_failed,
 					 const struct sched_cfg *cfg,
-					 bool *found_warm)
+					 bool allow_siblings, bool *found_warm)
 {
 	struct pick_ctx ctx = {
 		.p = p,
 		.nr_cpus = nr_cpus,
+		.allow_siblings = allow_siblings,
 		.has_cold = false,
 		.has_warm = false,
 		.best_cold_cpu = -1,
@@ -380,7 +448,7 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 	if (found_warm)
 		*found_warm = false;
 
-	if (!nr_cpus || !reuse_last_failed || !reuse_prev_failed)
+	if (!nr_cpus)
 		return -1;
 
 	ret = bpf_loop(ENERGY_AWARE_MAX_CPUS, pick_cold_cb, &ctx, 0);
@@ -394,7 +462,9 @@ static __always_inline s32 pick_cold_cpu(struct task_struct *p, __u32 nr_cpus,
 	if (ctx.best_warm_cpu >= 0)
 		return ctx.best_warm_cpu;
 
-	*found_warm = ctx.has_warm;
+	if (found_warm)
+		*found_warm = ctx.has_warm;
+
 	return -1;
 }
 
@@ -415,7 +485,7 @@ static long steer_cb(u64 idx, void *data)
 	if (!task_allows_cpu(ctx->p, cpu, ctx->nr_cpus))
 		return 0;
 
-	state = read_core_state(cpu);
+	state = read_core_state_cpu(cpu);
 
 	if (state == CORE_HOT)
 		scx_bpf_cpu_can_run(ctx->p, cpu, false);
@@ -540,12 +610,14 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 {
 	const struct sched_cfg *cfg = get_cfg();
 	__u32 nr_cpus = clamp_nr_cpus();
-	bool found_warm = false;
-	bool reuse_last_failed = true;
-	bool reuse_prev_failed = true;
+	bool found_warm_primary = false;
+	bool found_warm_any = false;
 	s32 cpu = -1;
 	struct task_ctx *tctx;
 	s32 last_cpu = -1;
+	bool prefer_primary = cfg_prefer_primary(cfg);
+	bool have_deferred = false;
+	s32 deferred_cpu = -1;
 
 	(void)wake_flags;
 
@@ -573,9 +645,13 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 		s32 reuse_cpu = reuse_prev_cpu(p, last_cpu, nr_cpus,
 					       cfg_max_reuse_depth(cfg));
 		if (reuse_cpu >= 0) {
-			cpu = reuse_cpu;
-			reuse_last_failed = false;
-			goto record_ctx;
+			if (!prefer_primary || cpu_is_primary(reuse_cpu)) {
+				cpu = reuse_cpu;
+				goto record_ctx;
+			}
+
+			deferred_cpu = reuse_cpu;
+			have_deferred = true;
 		}
 	}
 
@@ -583,18 +659,39 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 		s32 reuse_cpu = reuse_prev_cpu(p, prev_cpu, nr_cpus,
 					       cfg_max_reuse_depth(cfg));
 		if (reuse_cpu >= 0) {
-			cpu = reuse_cpu;
-			reuse_prev_failed = false;
+			if (!prefer_primary || cpu_is_primary(reuse_cpu)) {
+				cpu = reuse_cpu;
+				goto record_ctx;
+			}
+
+			if (!have_deferred) {
+				deferred_cpu = reuse_cpu;
+				have_deferred = true;
+			}
+		}
+	}
+
+	if (prefer_primary) {
+		cpu = pick_cold_cpu(p, nr_cpus, cfg, false, &found_warm_primary);
+		if (cpu >= 0)
+			goto record_ctx;
+
+		if (have_deferred) {
+			cpu = deferred_cpu;
 			goto record_ctx;
 		}
 	}
 
-	cpu = pick_cold_cpu(p, nr_cpus, reuse_last_failed, reuse_prev_failed,
-			    cfg, &found_warm);
+	cpu = pick_cold_cpu(p, nr_cpus, cfg, true, &found_warm_any);
 	if (cpu >= 0)
 		goto record_ctx;
 
-	if (found_warm) {
+	if (!prefer_primary && have_deferred) {
+		cpu = deferred_cpu;
+		goto record_ctx;
+	}
+
+	if (found_warm_primary || found_warm_any) {
 		steer_away_from_hot(p, nr_cpus);
 		if (tctx) {
 			tctx->pinned_cpu = -1;
@@ -615,7 +712,7 @@ record_ctx:
 		bool should_pin = false;
 
 		if (cpu >= 0 && cfg_pinning_enabled(cfg)) {
-			enum core_status state = read_core_state(cpu);
+			enum core_status state = read_core_state_cpu(cpu);
 
 			if (state == CORE_COLD || state == CORE_WARM) {
 				s32 dsq_depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(cpu));
