@@ -6,6 +6,11 @@
 
 char _license[] SEC("license") = "GPL";
 
+/* Dedicated fallback DSQ for kernel threads / default-ish path.
+ * Must be non-zero because your kernel treats DSQ 0 as invalid.
+ */
+#define FALLBACK_DSQ_ID 1ULL
+
 #define ENERGY_AWARE_DSQ_BASE (1ULL << 32)
 
 static __always_inline __u64 cpu_dsq_id(s32 cpu)
@@ -153,17 +158,14 @@ static __always_inline void log_sched_decision(struct task_struct *p, s32 prev_c
 			   p->pid, p->comm, prev_cpu, next_cpu);
 }
 
-/* Scheduler policy CPU cap (performance knob) */
 static __u32 clamp_nr_cpus(void)
 {
 	__u32 nr = scx_bpf_nr_cpu_ids();
-
 	if (nr > ENERGY_AWARE_MAX_CPUS)
 		return ENERGY_AWARE_MAX_CPUS;
 	return nr;
 }
 
-/* Real cpu count (for cpu_can_run masks, DSQ creation bounds, etc.) */
 static __always_inline __u32 clamp_nr_cpus_real(void)
 {
 	__u32 nr = scx_bpf_nr_cpu_ids();
@@ -309,7 +311,6 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 	bpf_loop(ENERGY_AWARE_MAX_CPUS, steer_cb, &ctx, 0);
 }
 
-/* cpu_can_run masks must cover the real cpu range - but never touch kernel threads */
 static __always_inline void allow_all_cpus(struct task_struct *p)
 {
 	if (is_kernelish(p))
@@ -344,7 +345,6 @@ static __always_inline s32 select_cpu_default(struct task_struct *p, s32 prev_cp
 					      u64 wake_flags)
 {
 	bool is_idle = false;
-
 	return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 }
 
@@ -373,7 +373,6 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	if (!nr_cpus) {
 		allow_all_cpus(p);
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
-		bpf_printk("Switched to EEVDF scheduler");
 		goto log_return;
 	}
 
@@ -394,7 +393,6 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	if (found_warm) {
 		steer_away_from_hot(p, nr_cpus);
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
-		bpf_printk("Switched to EEVDF scheduler");
 		goto log_return;
 	}
 
@@ -422,9 +420,9 @@ log_return:
 
 void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	/* Kernel threads: enqueue into built-in local DSQ (always valid) */
+	/* Kernel threads: enqueue into our explicit fallback DSQ (non-zero) */
 	if (is_kernelish(p)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, FALLBACK_DSQ_ID, SCX_SLICE_DFL, enq_flags);
 		return;
 	}
 
@@ -449,8 +447,8 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
-	/* Always drain built-in local DSQ first (kernel threads / fallback) */
-	scx_bpf_dsq_move_to_local(SCX_DSQ_LOCAL);
+	/* Always drain fallback DSQ first (kernel threads / default-ish tasks) */
+	scx_bpf_dsq_move_to_local(FALLBACK_DSQ_ID);
 
 	/* Then drain this CPU's per-CPU DSQ (user tasks) */
 	if ((__u32)cpu < dsq_nr_cpus)
@@ -459,7 +457,6 @@ void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
 {
-	/* Track last_cpu only for user tasks */
 	if (is_kernelish(p))
 		return;
 
@@ -511,8 +508,8 @@ void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei)
 		.err = 0,
 	};
 
-	if (!dsq_nr_cpus)
-		return;
+	if (dsq_nr_cpus)
+		bpf_loop(dsq_nr_cpus, dsq_destroy_cb, &loop_ctx, 0);
 
 	bpf_loop(dsq_nr_cpus, dsq_destroy_cb, &loop_ctx, 0);
 
