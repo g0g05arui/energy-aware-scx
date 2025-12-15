@@ -79,6 +79,36 @@ static __u64 last_printed_ts;
 #define SCHED_DECISION_LOG_INTERVAL_NS (100ULL * 1000 * 1000)
 static __u32 dsq_nr_cpus;
 
+struct dsq_loop_ctx {
+	__u32 nr_cpus;
+	s32 err;
+};
+
+static long dsq_create_cb(u64 idx, void *data)
+{
+	struct dsq_loop_ctx *ctx = data;
+
+	if ((__u32)idx >= ctx->nr_cpus)
+		return 1;
+
+	ctx->err = scx_bpf_create_dsq(cpu_dsq_id((s32)idx), -1);
+	if (ctx->err)
+		return 1;
+
+	return 0;
+}
+
+static long dsq_destroy_cb(u64 idx, void *data)
+{
+	struct dsq_loop_ctx *ctx = data;
+
+	if ((__u32)idx >= ctx->nr_cpus)
+		return 1;
+
+	scx_bpf_destroy_dsq(cpu_dsq_id((s32)idx));
+	return 0;
+}
+
 static __always_inline bool sched_log_should_emit(__u64 now)
 {
 	struct sched_log_state *state;
@@ -462,17 +492,18 @@ void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable) {}
 s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 {
 	__u32 nr_cpus = scx_bpf_nr_cpu_ids();
-	__u32 cpu;
-	s32 err;
+	struct dsq_loop_ctx ctx = {
+		.nr_cpus = nr_cpus,
+		.err = 0,
+	};
 
 	if (nr_cpus > NR_CPUS)
 		nr_cpus = NR_CPUS;
 
-	for (cpu = 0; cpu < nr_cpus; cpu++) {
-		err = scx_bpf_create_dsq(cpu_dsq_id(cpu), -1);
-		if (err)
-			return err;
-	}
+	ctx.nr_cpus = nr_cpus;
+	bpf_loop(nr_cpus, dsq_create_cb, &ctx, 0);
+	if (ctx.err)
+		return ctx.err;
 
 	dsq_nr_cpus = nr_cpus;
 	return 0;
@@ -480,10 +511,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 
 void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei)
 {
-	__u32 cpu;
+	struct dsq_loop_ctx ctx = {
+		.nr_cpus = dsq_nr_cpus,
+		.err = 0,
+	};
 
-	for (cpu = 0; cpu < dsq_nr_cpus; cpu++)
-		scx_bpf_destroy_dsq(cpu_dsq_id(cpu));
+	if (!dsq_nr_cpus)
+		return;
+
+	bpf_loop(dsq_nr_cpus, dsq_destroy_cb, &ctx, 0);
 }
 
 SEC(".struct_ops.link")
