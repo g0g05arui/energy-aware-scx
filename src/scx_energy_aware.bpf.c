@@ -392,9 +392,9 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/* Placement-only: dispatch immediately with default slice */
 	if (cpu >= 0)
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
 	else
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 }
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
