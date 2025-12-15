@@ -17,7 +17,7 @@ static __always_inline __u64 cpu_dsq_id(s32 cpu)
 #ifdef MAX_CPUS
 #define ENERGY_AWARE_MAX_CPUS MAX_CPUS
 #else
-#define ENERGY_AWARE_MAX_CPUS 32
+#define ENERGY_AWARE_MAX_CPUS 64
 #endif
 #endif
 
@@ -147,12 +147,22 @@ static __always_inline void log_sched_decision(struct task_struct *p, s32 prev_c
 			   p->pid, p->comm, prev_cpu, next_cpu);
 }
 
+/* Scheduler policy CPU cap (performance knob) */
 static __u32 clamp_nr_cpus(void)
 {
 	__u32 nr = scx_bpf_nr_cpu_ids();
 
 	if (nr > ENERGY_AWARE_MAX_CPUS)
 		return ENERGY_AWARE_MAX_CPUS;
+	return nr;
+}
+
+/* Real cpu count (for cpu_can_run masks, DSQ creation bounds, etc.) */
+static __always_inline __u32 clamp_nr_cpus_real(void)
+{
+	__u32 nr = scx_bpf_nr_cpu_ids();
+	if (nr > NR_CPUS)
+		nr = NR_CPUS;
 	return nr;
 }
 
@@ -217,8 +227,7 @@ static long pick_cold_cb(u64 idx, void *data)
 	state = read_core_state(cpu);
 
 	if (state == CORE_COLD) {
-		/* Measure depth of the per-CPU DSQ */
-			dsq_depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(cpu));
+		dsq_depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(cpu));
 		depth = dsq_depth < 0 ? (__u32)-1 : (__u32)dsq_depth;
 
 		if (depth < ctx->best_depth) {
@@ -294,23 +303,28 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 	bpf_loop(ENERGY_AWARE_MAX_CPUS, steer_cb, &ctx, 0);
 }
 
-static __always_inline void allow_all_cpus(struct task_struct *p, __u32 nr_cpus)
+/* IMPORTANT: cpu_can_run masks must cover the real cpu range */
+static __always_inline void allow_all_cpus(struct task_struct *p)
 {
 	if (!bpf_ksym_exists(scx_bpf_cpu_can_run))
 		return;
 
+	__u32 nr = clamp_nr_cpus_real();
+
 #pragma clang loop unroll(disable)
-	for (s32 i = 0; i < (s32)nr_cpus; i++)
+	for (s32 i = 0; i < (s32)nr; i++)
 		scx_bpf_cpu_can_run(p, i, true);
 }
 
-static __always_inline void pin_to_cpu(struct task_struct *p, __u32 nr_cpus, s32 cpu)
+static __always_inline void pin_to_cpu(struct task_struct *p, s32 cpu)
 {
 	if (!bpf_ksym_exists(scx_bpf_cpu_can_run))
 		return;
 
+	__u32 nr = clamp_nr_cpus_real();
+
 #pragma clang loop unroll(disable)
-	for (s32 i = 0; i < (s32)nr_cpus; i++)
+	for (s32 i = 0; i < (s32)nr; i++)
 		scx_bpf_cpu_can_run(p, i, i == cpu);
 }
 
@@ -320,70 +334,6 @@ static __always_inline s32 select_cpu_default(struct task_struct *p, s32 prev_cp
 	bool is_idle = false;
 
 	return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-}
-
-static __u32 read_temp(__u32 idx, bool *valid)
-{
-	__u32 *temp = bpf_map_lookup_elem(&core_temp_map, &idx);
-	if (temp) {
-		if (valid)
-			*valid = true;
-		return *temp;
-	}
-
-	if (valid)
-		*valid = false;
-	return 0;
-}
-
-static __u32 read_temp_count(__u32 stats_core_count)
-{
-	__u32 key = 0;
-	__u32 *count = bpf_map_lookup_elem(&core_temp_count_map, &key);
-
-	if (count && *count && *count <= MAX_CORE_TEMPS)
-		return *count;
-
-	if (stats_core_count == 0 || stats_core_count > MAX_CORE_TEMPS)
-		return MAX_CORE_TEMPS;
-
-	return stats_core_count;
-}
-
-static void log_stats_from_map(void)
-{
-	struct rapl_stats *stats;
-	__u32 key = 0;
-	__u32 temp_count;
-
-	stats = bpf_map_lookup_elem(&rapl_stats_map, &key);
-	if (!stats)
-		return;
-
-	if (stats->timestamp == last_printed_ts)
-		return;
-
-	last_printed_ts = stats->timestamp;
-
-	bpf_printk("RAPL ts=%llu delta=%llu pkg=%lluW/%uC core=%lluW cnt=%u tdp=%lluW",
-		   stats->timestamp,
-		   stats->delta_time,
-		   stats->package_power,
-		   stats->package_temp,
-		   stats->core_power,
-		   stats->core_count,
-		   stats->tdp);
-
-	temp_count = read_temp_count(stats->core_count);
-
-#pragma clang loop unroll(disable)
-	for (__u32 i = 0; i < MAX_CORE_TEMPS; i++) {
-		if (i >= temp_count)
-			break;
-		bool valid = false;
-		__u32 temp = read_temp(i, &valid);
-		bpf_printk("RAPL core[%d]=%uC%s", i, temp, valid ? "" : "?");
-	}
 }
 
 s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
@@ -402,25 +352,22 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 		last_cpu = tctx->last_cpu;
 
 	if (!nr_cpus) {
-		allow_all_cpus(p, nr_cpus);
+		allow_all_cpus(p);
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
 		bpf_printk("Switched to EEVDF scheduler");
 		goto log_return;
 	}
 
-	/* Prefer the CPU the task actually last ran on (real cache locality). */
 	if (last_cpu >= 0) {
 		cpu = reuse_prev_cpu(p, last_cpu, nr_cpus);
 		if (cpu >= 0)
 			goto log_return;
 	}
 
-	/* Fallback: try prev_cpu too (can be waker CPU / not true locality). */
 	cpu = reuse_prev_cpu(p, prev_cpu, nr_cpus);
 	if (cpu >= 0)
 		goto log_return;
 
-	/* Search for the coldest permitted CPU with the shallowest DSQ. */
 	cpu = pick_cold_cpu(p, nr_cpus, &found_warm);
 	if (cpu >= 0)
 		goto log_return;
@@ -432,7 +379,7 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 		goto log_return;
 	}
 
-	allow_all_cpus(p, nr_cpus);
+	allow_all_cpus(p);
 	cpu = select_cpu_default(p, prev_cpu, wake_flags);
 
 log_return:
@@ -446,9 +393,9 @@ log_return:
 	}
 
 	if (cpu >= 0 && (read_core_state(cpu) == CORE_COLD || read_core_state(cpu) == CORE_WARM))
-		pin_to_cpu(p, nr_cpus, cpu);
+		pin_to_cpu(p, cpu);
 	else
-		allow_all_cpus(p, nr_cpus);
+		allow_all_cpus(p);
 
 	log_sched_decision(p, prev_cpu, cpu);
 	return cpu;
