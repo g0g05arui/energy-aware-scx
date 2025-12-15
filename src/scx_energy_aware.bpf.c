@@ -89,6 +89,7 @@ static __u32 dsq_nr_cpus;
 static bool fallback_dsq_created;
 
 #define MAX_COLD_DSQ_DEPTH 4
+#define MAX_REUSE_DSQ_DEPTH 6
 
 struct dsq_loop_ctx {
 	__u32 nr_cpus;
@@ -198,15 +199,20 @@ static __always_inline bool task_allows_cpu(struct task_struct *p, s32 cpu, __u3
 static __always_inline s32 reuse_prev_cpu(struct task_struct *p, s32 prev_cpu, __u32 nr_cpus)
 {
 	enum core_status state;
+	s32 depth;
 
 	if (!task_allows_cpu(p, prev_cpu, nr_cpus))
 		return -1;
 
 	state = read_core_state(prev_cpu);
-	if (state == CORE_COLD || state == CORE_WARM)
-		return prev_cpu;
+	if (state != CORE_COLD && state != CORE_WARM)
+		return -1;
 
-	return -1;
+	depth = scx_bpf_dsq_nr_queued(cpu_dsq_id(prev_cpu));
+	if (depth >= 0 && depth > MAX_REUSE_DSQ_DEPTH)
+		return -1;
+
+	return prev_cpu;
 }
 
 struct pick_ctx {
