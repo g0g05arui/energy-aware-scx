@@ -47,7 +47,7 @@ BPF_CFLAGS = -O2 -g -target bpf -D__TARGET_ARCH_$(BPF_TARGET_ARCH) \
 
 BPF_SCX_CFLAGS = $(BPF_CFLAGS) -I$(SCX_INCLUDE)
 
-CFLAGS = -O2 -Wall -I$(INCLUDE_DIR)
+CFLAGS = -O2 -Wall -I$(INCLUDE_DIR) -I$(SCX_INCLUDE)
 LDFLAGS = -lbpf -lelf -lz
 
 BPF_OBJ = $(BUILD_DIR)/repl_stats_interval.bpf.o

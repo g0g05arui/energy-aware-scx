@@ -11,6 +11,8 @@
 #include <string.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
+#include <bpf/btf.h>
+#include <scx/common.h>
 
 static volatile sig_atomic_t keep_running = 1;
 
@@ -24,6 +26,113 @@ static void sig_handler(int signo)
 {
 	(void)signo;
 	keep_running = 0;
+}
+
+#define DSQ_FLAG_BUILTIN_FALLBACK (1ULL << 63)
+#define DSQ_FLAG_LOCAL_ON_FALLBACK (1ULL << 62)
+#define DSQ_LOCAL_FALLBACK (DSQ_FLAG_BUILTIN_FALLBACK | 2ULL)
+#define DSQ_LOCAL_ON_BASE_FALLBACK \
+	(DSQ_FLAG_BUILTIN_FALLBACK | DSQ_FLAG_LOCAL_ON_FALLBACK)
+#define DSQ_LOCAL_CPU_MASK_FALLBACK (0xffffffffULL)
+#define SCX_SLICE_DFL_FALLBACK (20ULL * 1000 * 1000)
+
+struct scx_enum_spec {
+	const char *var_name;
+	const char *enum_type;
+	const char *enum_name;
+	__u64 fallback;
+};
+
+static int rewrite_rodata_u64(const struct btf *btf, void *rodata, size_t sz,
+			      const char *var_name, __u64 value)
+{
+	const struct btf_var_secinfo *var_info;
+	const struct btf_type *sec;
+	int i, sec_id;
+
+	sec_id = btf__find_by_name_kind(btf, ".rodata", BTF_KIND_DATASEC);
+	if (sec_id < 0)
+		return -ENOENT;
+
+	sec = btf__type_by_id(btf, sec_id);
+	var_info = btf_var_secinfos(sec);
+
+	for (i = 0; i < BTF_INFO_VLEN(sec->info); i++) {
+		const struct btf_type *var_type;
+		const char *name;
+
+		var_type = btf__type_by_id(btf, var_info[i].type);
+		name = btf__name_by_offset(btf, var_type->name_off);
+		if (!name)
+			continue;
+		if (strcmp(name, var_name) != 0)
+			continue;
+		if (var_info[i].offset + sizeof(__u64) > sz)
+			return -E2BIG;
+		*(__u64 *)((char *)rodata + var_info[i].offset) = value;
+		return 0;
+	}
+
+	return -ENOENT;
+}
+
+static int populate_scx_rodata(struct bpf_object *obj)
+{
+	static const struct scx_enum_spec enum_specs[] = {
+		{ "__SCX_DSQ_LOCAL", "scx_dsq_id_flags", "SCX_DSQ_LOCAL",
+		  DSQ_LOCAL_FALLBACK },
+		{ "__SCX_DSQ_LOCAL_ON", "scx_dsq_id_flags", "SCX_DSQ_LOCAL_ON",
+		  DSQ_LOCAL_ON_BASE_FALLBACK },
+		{ "__SCX_DSQ_LOCAL_CPU_MASK", "scx_dsq_id_flags",
+		  "SCX_DSQ_LOCAL_CPU_MASK", DSQ_LOCAL_CPU_MASK_FALLBACK },
+		{ "__SCX_SLICE_DFL", "scx_public_consts", "SCX_SLICE_DFL",
+		  SCX_SLICE_DFL_FALLBACK },
+	};
+	const struct btf *btf = bpf_object__btf(obj);
+	struct bpf_map *rodata_map;
+	size_t sz;
+	void *rodata;
+	int err = 0;
+	int i;
+
+	if (!btf) {
+		fprintf(stderr, "ERROR: BTF missing in BPF object\n");
+		return -EINVAL;
+	}
+
+	rodata_map = bpf_object__find_map_by_name(obj, ".rodata");
+	if (!rodata_map)
+		return 0;
+
+	rodata = bpf_map__initial_value(rodata_map, &sz);
+	if (!rodata) {
+		fprintf(stderr, "ERROR: failed to access .rodata contents\n");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < (int)(sizeof(enum_specs) / sizeof(enum_specs[0])); i++) {
+		const struct scx_enum_spec *spec = &enum_specs[i];
+		__u64 value;
+
+		if (!__COMPAT_read_enum(spec->enum_type, spec->enum_name,
+					&value)) {
+			fprintf(stderr,
+				"WARN: enum %s::%s not found, using fallback\n",
+				spec->enum_type, spec->enum_name);
+			value = spec->fallback;
+		}
+
+		err = rewrite_rodata_u64(btf, rodata, sz, spec->var_name,
+					 value);
+		if (err) {
+			fprintf(stderr,
+				"ERROR: failed to rewrite %s in .rodata (%d)\n",
+				spec->var_name, err);
+			return err;
+		}
+	}
+
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -151,6 +260,10 @@ int main(int argc, char **argv)
 		err = -errno;
 		goto cleanup;
 	}
+
+	err = populate_scx_rodata(obj);
+	if (err)
+		goto cleanup;
 
 	err = bpf_object__load(obj);
 	if (err) {
