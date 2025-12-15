@@ -228,6 +228,12 @@ def main() -> None:
     parser.add_argument("--output", default="./build/benchmark_results.png", help="Output graph path")
     parser.add_argument("--results-json", default="./build/benchmark_results.json", help="Raw results JSON")
     parser.add_argument("--workdir", default=".", help="Working directory for workloads")
+    parser.add_argument(
+        "--cooldown-seconds",
+        type=int,
+        default=10,
+        help="Sleep between scheduler runs so cores can cool (seconds)",
+    )
     args = parser.parse_args()
 
     ensure_tools()
@@ -272,6 +278,9 @@ def main() -> None:
                 )
         finally:
             stop_scheduler(loader_proc)
+            if args.cooldown_seconds > 0:
+                print(f"Cooling down for {args.cooldown_seconds}s...")
+                time.sleep(args.cooldown_seconds)
 
     if not results:
         print("No benchmark data collected.")
