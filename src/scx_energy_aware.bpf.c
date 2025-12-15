@@ -6,6 +6,9 @@
 
 char _license[] SEC("license") = "GPL";
 
+/* Create our own per-CPU DSQs instead of relying on SCX_DSQ_LOCAL_ON encoding */
+#define DSQ_BASE 1024
+
 #ifndef ENERGY_AWARE_MAX_CPUS
 #ifdef MAX_CPUS
 #define ENERGY_AWARE_MAX_CPUS MAX_CPUS
@@ -179,7 +182,8 @@ static long pick_cold_cb(u64 idx, void *data)
 	state = read_core_state(cpu);
 
 	if (state == CORE_COLD) {
-		dsq_depth = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+		/* Measure depth of our per-CPU DSQ */
+		dsq_depth = scx_bpf_dsq_nr_queued(DSQ_BASE + cpu);
 		depth = dsq_depth < 0 ? (__u32)-1 : (__u32)dsq_depth;
 
 		if (depth < ctx->best_depth) {
@@ -386,11 +390,6 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	if (cpu >= 0)
 		goto log_return;
 
-	/*
-	 * No cold CPUs remain. If we saw at least one warm candidate,
-	 * exclude hot CPUs and ask the default selector (EEVDF / CFS)
-	 * to choose among the remaining warm CPUs.
-	 */
 	if (found_warm) {
 		steer_away_from_hot(p, nr_cpus);
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
@@ -398,10 +397,6 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 		goto log_return;
 	}
 
-	/*
-	 * Every allowed CPU is hot (or none were eligible). Fall back
-	 * without exclusions so the kernel can pick the least bad CPU.
-	 */
 	allow_all_cpus(p, nr_cpus);
 	cpu = select_cpu_default(p, prev_cpu, wake_flags);
 
@@ -415,10 +410,6 @@ log_return:
 			tctx2->target_cpu = cpu;
 	}
 
-	/*
-	 * Enforce stickiness while cold/warm: only allow the chosen CPU.
-	 * If we picked via default fallback (or invalid), allow all CPUs.
-	 */
 	if (cpu >= 0 && (read_core_state(cpu) == CORE_COLD || read_core_state(cpu) == CORE_WARM))
 		pin_to_cpu(p, nr_cpus, cpu);
 	else
@@ -438,14 +429,14 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 		cpu = tctx->target_cpu;
 
 	if (cpu >= 0)
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, DSQ_BASE + cpu, SCX_SLICE_DFL, enq_flags);
 	else
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, DSQ_BASE + 0, SCX_SLICE_DFL, enq_flags);
 }
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
-	scx_bpf_dsq_move_to_local(SCX_DSQ_LOCAL_ON | cpu);
+	scx_bpf_dsq_move_to_local(DSQ_BASE + cpu);
 }
 
 void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
@@ -462,6 +453,17 @@ void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable) {}
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 {
+	__u32 nr = clamp_nr_cpus();
+
+#pragma clang loop unroll(disable)
+	for (__u32 i = 0; i < ENERGY_AWARE_MAX_CPUS; i++) {
+		if (i >= nr)
+			break;
+		s32 err = scx_bpf_create_dsq(DSQ_BASE + i, -1);
+		if (err)
+			return err;
+	}
+
 	return 0;
 }
 
