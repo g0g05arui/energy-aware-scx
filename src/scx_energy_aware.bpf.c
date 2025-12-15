@@ -255,6 +255,26 @@ static __always_inline void steer_away_from_hot(struct task_struct *p, __u32 nr_
 	bpf_loop(ENERGY_AWARE_MAX_CPUS, steer_cb, &ctx, 0);
 }
 
+static __always_inline void allow_all_cpus(struct task_struct *p, __u32 nr_cpus)
+{
+	if (!bpf_ksym_exists(scx_bpf_cpu_can_run))
+		return;
+
+#pragma clang loop unroll(disable)
+	for (s32 i = 0; i < (s32)nr_cpus; i++)
+		scx_bpf_cpu_can_run(p, i, true);
+}
+
+static __always_inline void pin_to_cpu(struct task_struct *p, __u32 nr_cpus, s32 cpu)
+{
+	if (!bpf_ksym_exists(scx_bpf_cpu_can_run))
+		return;
+
+#pragma clang loop unroll(disable)
+	for (s32 i = 0; i < (s32)nr_cpus; i++)
+		scx_bpf_cpu_can_run(p, i, i == cpu);
+}
+
 static __always_inline s32 select_cpu_default(struct task_struct *p, s32 prev_cpu,
 					      u64 wake_flags)
 {
@@ -343,6 +363,7 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 		last_cpu = tctx->last_cpu;
 
 	if (!nr_cpus) {
+		allow_all_cpus(p, nr_cpus);
 		cpu = select_cpu_default(p, prev_cpu, wake_flags);
 		bpf_printk("Switched to EEVDF scheduler");
 		goto log_return;
@@ -381,6 +402,7 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	 * Every allowed CPU is hot (or none were eligible). Fall back
 	 * without exclusions so the kernel can pick the least bad CPU.
 	 */
+	allow_all_cpus(p, nr_cpus);
 	cpu = select_cpu_default(p, prev_cpu, wake_flags);
 
 log_return:
@@ -392,6 +414,16 @@ log_return:
 		if (tctx2)
 			tctx2->target_cpu = cpu;
 	}
+
+	/*
+	 * Enforce stickiness while cold/warm: only allow the chosen CPU.
+	 * If we picked via default fallback (or invalid), allow all CPUs.
+	 */
+	if (cpu >= 0 && (read_core_state(cpu) == CORE_COLD || read_core_state(cpu) == CORE_WARM))
+		pin_to_cpu(p, nr_cpus, cpu);
+	else
+		allow_all_cpus(p, nr_cpus);
+
 	log_sched_decision(p, prev_cpu, cpu);
 	return cpu;
 }
@@ -405,7 +437,6 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 	if (tctx)
 		cpu = tctx->target_cpu;
 
-	/* Placement-only: dispatch immediately with default slice */
 	if (cpu >= 0)
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
 	else
