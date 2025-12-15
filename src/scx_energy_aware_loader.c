@@ -257,20 +257,11 @@ static int populate_topology_maps(struct bpf_object *obj,
 int main(int argc, char **argv)
 {
 	const char *bpf_obj_path = "scx_energy_aware.bpf.o";
-	const char *stats_pin_path = "/sys/fs/bpf/rapl_stats";
-	const char *temps_pin_path = "/sys/fs/bpf/rapl_temps";
-	const char *temp_count_pin_path = "/sys/fs/bpf/rapl_temp_count";
 	const char *state_pin_path = "/sys/fs/bpf/rapl_core_states";
 	struct bpf_object *obj = NULL;
 	struct bpf_link *link = NULL;
 	struct bpf_map *ops_map;
-	struct bpf_map *stats_map;
-	struct bpf_map *temps_map;
-	struct bpf_map *temp_count_map;
 	struct bpf_map *state_map;
-	int stats_fd = -1;
-	int temps_fd = -1;
-	int temp_count_fd = -1;
 	int state_fd = -1;
 	int err = 0;
 	struct topo topo = {};
@@ -358,33 +349,6 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	stats_fd = bpf_obj_get(stats_pin_path);
-	if (stats_fd < 0) {
-		fprintf(stderr, "ERROR: failed to open pinned map at %s: %s\n",
-			stats_pin_path, strerror(errno));
-		fprintf(stderr, "Make sure rapl_stats_updater is running.\n");
-		err = -errno;
-		goto cleanup;
-	}
-
-	temps_fd = bpf_obj_get(temps_pin_path);
-	if (temps_fd < 0) {
-		fprintf(stderr, "ERROR: failed to open pinned map at %s: %s\n",
-			temps_pin_path, strerror(errno));
-		fprintf(stderr, "Make sure rapl_stats_updater is running.\n");
-		err = -errno;
-		goto cleanup;
-	}
-
-	temp_count_fd = bpf_obj_get(temp_count_pin_path);
-	if (temp_count_fd < 0) {
-		fprintf(stderr, "ERROR: failed to open pinned map at %s: %s\n",
-			temp_count_pin_path, strerror(errno));
-		fprintf(stderr, "Make sure hwmon_stats_updater is running.\n");
-		err = -errno;
-		goto cleanup;
-	}
-
 	state_fd = bpf_obj_get(state_pin_path);
 	if (state_fd < 0) {
 		fprintf(stderr, "ERROR: failed to open pinned map at %s: %s\n",
@@ -403,52 +367,10 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	stats_map = bpf_object__find_map_by_name(obj, "rapl_stats_map");
-	if (!stats_map) {
-		fprintf(stderr, "ERROR: rapl_stats_map not found in object\n");
-		err = -ENOENT;
-		goto cleanup;
-	}
-
-	temps_map = bpf_object__find_map_by_name(obj, "core_temp_map");
-	if (!temps_map) {
-		fprintf(stderr, "ERROR: core_temp_map not found in object\n");
-		err = -ENOENT;
-		goto cleanup;
-	}
-
-	temp_count_map = bpf_object__find_map_by_name(obj, "core_temp_count_map");
-	if (!temp_count_map) {
-		fprintf(stderr, "ERROR: core_temp_count_map not found in object\n");
-		err = -ENOENT;
-		goto cleanup;
-	}
-
 	state_map = bpf_object__find_map_by_name(obj, "core_state_map");
 	if (!state_map) {
 		fprintf(stderr, "ERROR: core_state_map not found in object\n");
 		err = -ENOENT;
-		goto cleanup;
-	}
-
-	if (bpf_map__reuse_fd(stats_map, stats_fd)) {
-		fprintf(stderr, "ERROR: failed to link rapl_stats map: %s\n",
-			strerror(errno));
-		err = -errno;
-		goto cleanup;
-	}
-
-	if (bpf_map__reuse_fd(temps_map, temps_fd)) {
-		fprintf(stderr, "ERROR: failed to link core_temp_map: %s\n",
-			strerror(errno));
-		err = -errno;
-		goto cleanup;
-	}
-
-	if (bpf_map__reuse_fd(temp_count_map, temp_count_fd)) {
-		fprintf(stderr, "ERROR: failed to link core_temp_count_map: %s\n",
-			strerror(errno));
-		err = -errno;
 		goto cleanup;
 	}
 
@@ -494,9 +416,6 @@ int main(int argc, char **argv)
 	}
 
 	printf("Round-Robin scheduler loaded and attached successfully.\n");
-	printf("Pinned RAPL stats map: %s\n", stats_pin_path);
-	printf("Pinned RAPL temps map: %s\n", temps_pin_path);
-	printf("Pinned RAPL temp count map: %s\n", temp_count_pin_path);
 	printf("Pinned RAPL core state map: %s\n", state_pin_path);
 	printf("Physical cores discovered: %u (prefer primary=%s)\n",
 	       topo.nr_cores, prefer_primary_flag ? "yes" : "no");
@@ -512,12 +431,6 @@ int main(int argc, char **argv)
 cleanup:
 	if (state_fd >= 0)
 		close(state_fd);
-	if (temp_count_fd >= 0)
-		close(temp_count_fd);
-	if (temps_fd >= 0)
-		close(temps_fd);
-	if (stats_fd >= 0)
-		close(stats_fd);
 	if (link)
 		bpf_link__destroy(link);
 	if (obj)
