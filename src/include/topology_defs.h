@@ -1,13 +1,18 @@
 #ifndef TOPOLOGY_DEFS_H
 #define TOPOLOGY_DEFS_H
 
-#include <stdint.h>
-
-#ifndef __BPF__
-#include <linux/types.h>
-#endif
-
 #include "rapl_stats.h"
+
+#ifdef __BPF__
+#ifndef __u32
+#define __u32 unsigned int
+#endif
+#else
+#include <stdint.h>
+#ifndef __u32
+#define __u32 uint32_t
+#endif
+#endif
 
 #ifndef TOPO_MAX_CPUS
 #define TOPO_MAX_CPUS 256
