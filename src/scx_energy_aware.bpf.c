@@ -86,6 +86,13 @@ struct {
 	__type(value, struct core_siblings);
 } core_siblings_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_CORE_TEMPS);
+	__type(key, __u32);
+	__type(value, __u32);
+} core_active_map SEC(".maps");
+
 #define DEFAULT_MAX_COLD_DSQ_DEPTH 4
 #define DEFAULT_MAX_REUSE_DSQ_DEPTH 6
 #define DEFAULT_ENABLE_PINNING 1
@@ -334,6 +341,77 @@ static __always_inline bool cpu_is_primary(__u32 cpu)
 	return *primary == cpu;
 }
 
+static __always_inline __u32 core_capacity(__u32 core_gid)
+{
+	const struct core_siblings *sibs;
+
+	if (core_gid == TOPO_GID_INVALID)
+		return 1;
+
+	sibs = bpf_map_lookup_elem(&core_siblings_map, &core_gid);
+	if (!sibs || sibs->sib_cnt == 0)
+		return 1;
+
+	return sibs->sib_cnt;
+}
+
+static __always_inline __u32 core_active_count(__u32 core_gid)
+{
+	__u32 *cnt;
+
+	if (core_gid == TOPO_GID_INVALID)
+		return 0;
+
+	cnt = bpf_map_lookup_elem(&core_active_map, &core_gid);
+	if (!cnt)
+		return 0;
+
+	return *cnt;
+}
+
+static __always_inline void core_active_inc_gid(__u32 core_gid)
+{
+	__u32 *cnt;
+
+	if (core_gid == TOPO_GID_INVALID)
+		return;
+
+	cnt = bpf_map_lookup_elem(&core_active_map, &core_gid);
+	if (!cnt)
+		return;
+
+	__sync_fetch_and_add(cnt, 1);
+}
+
+static __always_inline void core_active_dec_gid(__u32 core_gid)
+{
+	__u32 *cnt;
+
+	if (core_gid == TOPO_GID_INVALID)
+		return;
+
+	cnt = bpf_map_lookup_elem(&core_active_map, &core_gid);
+	if (!cnt)
+		return;
+
+	if (*cnt > 0)
+		__sync_fetch_and_sub(cnt, 1);
+}
+
+static __always_inline void core_active_inc_cpu(__u32 cpu)
+{
+	__u32 gid = get_core_gid_from_cpu(cpu);
+
+	core_active_inc_gid(gid);
+}
+
+static __always_inline void core_active_dec_cpu(__u32 cpu)
+{
+	__u32 gid = get_core_gid_from_cpu(cpu);
+
+	core_active_dec_gid(gid);
+}
+
 static __always_inline bool task_allows_cpu(struct task_struct *p, s32 cpu, __u32 nr_cpus)
 {
 	if (cpu < 0)
@@ -385,6 +463,9 @@ static long pick_cold_cb(u64 idx, void *data)
 	s32 dsq_depth;
 	__u32 depth;
 	enum core_status state;
+	__u32 core_gid;
+	__u32 capacity;
+	__u32 active;
 
 	if ((__u32)cpu >= ctx->nr_cpus)
 		return 1;
@@ -393,6 +474,22 @@ static long pick_cold_cb(u64 idx, void *data)
 		return 0;
 
 	if (!ctx->allow_siblings && !cpu_is_primary(cpu))
+		return 0;
+
+	core_gid = get_core_gid_from_cpu(cpu);
+	if (core_gid == TOPO_GID_INVALID)
+		return 0;
+
+	capacity = core_capacity(core_gid);
+	if (capacity == 0)
+		capacity = 1;
+
+	active = core_active_count(core_gid);
+
+	if (!ctx->allow_siblings && active > 0)
+		return 0;
+
+	if (ctx->allow_siblings && active >= capacity)
 		return 0;
 
 	state = read_core_state_cpu(cpu);
@@ -772,6 +869,9 @@ void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
+	if (prev && !is_kernelish(prev))
+		core_active_dec_cpu((__u32)cpu);
+
 	/* Always drain built-in local DSQ first (kernel threads / fallback) */
 	if (fallback_dsq_created)
 		scx_bpf_dsq_move_to_local(FALLBACK_DSQ_ID);
@@ -787,13 +887,16 @@ void BPF_STRUCT_OPS(rr_running, struct task_struct *p)
 		return;
 
 	struct task_ctx *tctx;
+	__u32 cpu = (__u32)bpf_get_smp_processor_id();
 
 	tctx = bpf_task_storage_get(&task_ctx_map, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (tctx) {
 		init_task_ctx(tctx);
-		tctx->last_cpu = (s32)bpf_get_smp_processor_id();
+		tctx->last_cpu = (s32)cpu;
 	}
+
+	core_active_inc_cpu(cpu);
 }
 
 void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable) {}
