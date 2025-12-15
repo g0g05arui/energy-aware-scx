@@ -93,6 +93,7 @@ static __always_inline void log_sched_decision(struct task_struct *p, s32 prev_c
 	if (!sched_log_should_emit(now))
 		return;
 
+	//add debugging flag from makefile
 	if(prev_cpu != next_cpu)
 		bpf_printk("SCX sched pid=%d comm=%s prev=%d next=%d",
 		   p->pid, p->comm, prev_cpu, next_cpu);
