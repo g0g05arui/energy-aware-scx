@@ -538,11 +538,13 @@ static long pick_cold_cb(u64 idx, void *data)
 
 	active = core_active_count(core_gid);
 
-	if (!ctx->allow_siblings && active > 0)
-		return 0;
-
-	if (ctx->allow_siblings && active >= capacity)
-		return 0;
+	if (!ctx->allow_siblings) {
+		if (capacity > 1 && active > 0)
+			return 0;
+	} else {
+		if (active >= capacity)
+			return 0;
+	}
 
 	state = read_core_state_cpu(cpu);
 
