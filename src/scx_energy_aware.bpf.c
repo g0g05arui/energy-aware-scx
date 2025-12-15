@@ -6,8 +6,6 @@
 
 char _license[] SEC("license") = "GPL";
 
-#define RR_SLICE_NS SCX_SLICE_DFL
-
 #ifndef ENERGY_AWARE_MAX_CPUS
 #ifdef MAX_CPUS
 #define ENERGY_AWARE_MAX_CPUS MAX_CPUS
@@ -57,6 +55,17 @@ struct {
 	__type(key, __u32);
 	__type(value, struct sched_log_state);
 } sched_log_state_map SEC(".maps");
+
+struct task_ctx {
+	s32 target_cpu;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct task_ctx);
+} task_ctx_map SEC(".maps");
 
 static __u64 last_printed_ts;
 #define SCHED_DECISION_LOG_INTERVAL_NS (100ULL * 1000 * 1000)
@@ -360,19 +369,37 @@ s32 BPF_STRUCT_OPS(select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_fla
 	cpu = select_cpu_default(p, prev_cpu, wake_flags);
 
 log_return:
+	{
+		struct task_ctx *tctx;
+
+		tctx = bpf_task_storage_get(&task_ctx_map, p, 0,
+					    BPF_LOCAL_STORAGE_GET_F_CREATE);
+		if (tctx)
+			tctx->target_cpu = cpu;
+	}
 	log_sched_decision(p, prev_cpu, cpu);
 	return cpu;
 }
 
 void BPF_STRUCT_OPS(rr_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, RR_SLICE_NS, enq_flags);
+	struct task_ctx *tctx;
+	s32 cpu = -1;
+
+	tctx = bpf_task_storage_get(&task_ctx_map, p, 0, 0);
+	if (tctx)
+		cpu = tctx->target_cpu;
+
+	/* Placement-only: dispatch immediately with default slice */
+	if (cpu >= 0)
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
+	else
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 }
 
 void BPF_STRUCT_OPS(rr_dispatch, s32 cpu, struct task_struct *prev)
 {
-	//log_stats_from_map();
-	scx_bpf_dsq_move_to_local(SCX_DSQ_LOCAL);
+	scx_bpf_dsq_move_to_local(SCX_DSQ_LOCAL_ON | cpu);
 }
 
 void BPF_STRUCT_OPS(rr_running, struct task_struct *p){}
@@ -381,7 +408,7 @@ void BPF_STRUCT_OPS(rr_stopping, struct task_struct *p, bool runnable){}
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(rr_init)
 {
-	return scx_bpf_create_dsq(0, -1);
+	return 0;
 }
 
 void BPF_STRUCT_OPS(rr_exit, struct scx_exit_info *ei){}
