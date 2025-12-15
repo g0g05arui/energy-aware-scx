@@ -276,6 +276,11 @@ def main() -> None:
                     f"     runtime={runtime:.2f}s energy={energy_j:.2f}J "
                     f"power={avg_power:.2f}W fairness_cv={fairness:.3f}"
                 )
+
+                workload_pause = max(args.cooldown_seconds / 2.0, 0.0)
+                if workload_pause > 0:
+                    print(f"     cooling before next workload for {workload_pause:.1f}s...")
+                    time.sleep(workload_pause)
         finally:
             stop_scheduler(loader_proc)
             if args.cooldown_seconds > 0:
