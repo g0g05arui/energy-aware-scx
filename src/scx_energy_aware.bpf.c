@@ -697,9 +697,9 @@ static __always_inline bool cpu_matches_core(const struct core_siblings *core,
 
 #pragma clang loop unroll(disable)
 	for (__u32 idx = 0; idx < TOPO_MAX_SIBLINGS; idx++) {
-		if (idx >= core->siblings.sib_cnt)
+		if (idx >= core->sib_cnt)
 			break;
-		if (core->siblings.sibs[idx] == cpu)
+		if (core->sibs[idx] == cpu)
 			return true;
 	}
 
@@ -723,7 +723,7 @@ static __always_inline void pin_to_core(struct task_struct *p, __u32 cpu)
 	for (s32 i = 0; i < (s32)nr; i++) {
 		bool allow = false;
 
-		if (core && core->siblings.sib_cnt > 0)
+		if (core && core->sib_cnt > 0)
 			allow = cpu_matches_core(core, (__u32)i);
 		else
 			allow = (i == (s32)cpu);
